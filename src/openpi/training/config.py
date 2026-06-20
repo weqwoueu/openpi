@@ -844,7 +844,34 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
     ),
-    # LoRA 低显存版（单卡 H200 / 4090 跑得动）。EE-only，state=20D，action_dim=32 默认值。
+    # LoRA 微调版：只训练 LoRA 参数，checkpoint/显存压力比 full fine-tune 小，优先用这个做小数据实验。
+    TrainConfig(
+        name="pi05_tianji_flip_box_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotTianjiDataConfig(
+            repo_id="tianji_pico_filp_box_over_clean",
+            base_config=DataConfig(prompt_from_task=True),
+            state_mode="ee",
+        ),
+        batch_size=32,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    # 旧名字保留为别名，避免已经写好的命令失效。
     TrainConfig(
         name="pi05_tianji_flip_box_low_mem_finetune",
         model=pi0_config.Pi0Config(

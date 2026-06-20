@@ -5,7 +5,7 @@
 - 摄像头键名: observation.images.cam_high / .cam_left_wrist / .cam_right_wrist
 
 ``state_mode`` 选择喂给模型的 state schema：
-  - "ee"    （默认）20D：左右末端(xyz+r6d) + grippers，跟 action 同 schema
+  - "ee"    （默认）20D：left ee + left gripper + right ee + right gripper，跟 action 左右顺序一致
   - "joint"        16D：左右 7 关节角(deg) + grippers
   - "both"         34D：全要（要求 model.action_dim ≥ 34）
 """
@@ -34,8 +34,20 @@ def _select_state(full_state: np.ndarray, mode: StateMode) -> np.ndarray:
     if mode == "both":
         return full_state
     if mode == "ee":
-        # 丢前 14 维关节，保留 ee + grippers → 20D
-        return full_state[..., _JOINT_DIMS:]
+        # 重排成跟 action 一样的左右结构：
+        # left ee(9), left gripper, right ee(9), right gripper → 20D
+        left_ee_start = _JOINT_DIMS
+        right_ee_start = _JOINT_DIMS + 9
+        gripper_start = _JOINT_DIMS + _EE_DIMS
+        return np.concatenate(
+            [
+                full_state[..., left_ee_start : left_ee_start + 9],
+                full_state[..., gripper_start : gripper_start + 1],
+                full_state[..., right_ee_start : right_ee_start + 9],
+                full_state[..., gripper_start + 1 : gripper_start + 2],
+            ],
+            axis=-1,
+        )
     if mode == "joint":
         # 留前 14 维关节 + 末尾 2 维 grippers，丢中间 18 维 ee → 16D
         joints = full_state[..., :_JOINT_DIMS]
@@ -47,7 +59,7 @@ def _select_state(full_state: np.ndarray, mode: StateMode) -> np.ndarray:
 def make_tianji_example() -> dict:
     """Random example for testing the input pipeline."""
     return {
-        # 34D: 14 joints + 9 left ee + 9 right ee + 2 grippers，模型实际只用后 20D
+        # 34D: 14 joints + 9 left ee + 9 right ee + 2 grippers，ee mode 会重排成 action 左右顺序。
         "observation/state": np.random.rand(34).astype(np.float32),
         "observation/image": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
         "observation/wrist_image_left": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
@@ -70,7 +82,7 @@ class TianjiInputs(transforms.DataTransformFn):
     """LeRobot tianji frame -> model 输入。
 
     ``state_mode``:
-      - "ee"   （默认）20D：左右末端(xyz+r6d) + grippers，跟 action 同 schema，pi05 训练最稳
+      - "ee"   （默认）20D：left ee + left gripper + right ee + right gripper，跟 action 左右顺序一致
       - "joint"        16D：左右 7 关节角(deg) + grippers
       - "both"         34D：全部信息（要 model.action_dim ≥ 34）
     """
