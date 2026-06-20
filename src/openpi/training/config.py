@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.tianji_policy as tianji_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -347,6 +348,67 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         model_transforms = ModelTransformFactory()(model_config)
 
         # We return all data transforms for training and inference. No need to change anything here.
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotTianjiDataConfig(DataConfigFactory):
+    """天机 bi_tianji_marvin pico 录制数据集 → pi0/pi05 训练 pipeline。
+
+    LeRobot 数据集字段（recorded by ``run_record_tianji_pico.sh`` w/ ACTION_MODE=absolute）：
+      - observation.images.cam_high            (480, 640, 3)
+      - observation.images.cam_left_wrist      (480, 640, 3)
+      - observation.images.cam_right_wrist     (480, 640, 3)
+      - observation.state    34D  关节角(14) + 左 ee(9) + 右 ee(9) + grippers(2)
+      - action               20D  左 ee(xyz+r6d)+trigger + 右 ee(xyz+r6d)+trigger
+
+    ``state_mode``:
+      - "ee"   （默认）20D：左右末端(xyz+r6d) + grippers，跟 action 同 schema，``action_dim=32`` 即可
+      - "joint"        16D：左右关节角(deg) + grippers，``action_dim=32`` 即可
+      - "both"         34D：全要，要求 ``action_dim ≥ 34``（建议 64）
+    """
+
+    state_mode: tianji_policy.StateMode = "ee"
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # 把 lerobot 数据集里多嵌套层级的键名扁平化成 policy 期望的形式。
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "observation.images.cam_high",
+                        "observation/wrist_image_left": "observation.images.cam_left_wrist",
+                        "observation/wrist_image_right": "observation.images.cam_right_wrist",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[
+                tianji_policy.TianjiInputs(
+                    model_type=model_config.model_type,
+                    state_mode=self.state_mode,
+                )
+            ],
+            outputs=[tianji_policy.TianjiOutputs()],
+        )
+
+        # 我们的 action 是 absolute EE（xyz+r6d）+ trigger。pi05 在绝对动作上效果好，
+        # 不再做 delta 转换。如果以后想试 delta 监督，给前 9 维（左 xyz+r6d）和后续 9 维（右）
+        # 标 True、trigger 标 False 即可：make_bool_mask(9, -1, 9, -1)。
+
+        model_transforms = ModelTransformFactory()(model_config)
+
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             repack_transforms=repack_transform,
@@ -759,6 +821,80 @@ _CONFIGS = [
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=30_000,
+    ),
+    #
+    # Fine-tuning Tianji (bi_tianji_marvin + Pico) configs.
+    #
+    # 数据集放在 ``$HF_LEROBOT_HOME/<repo_id>/``。当前 repo_id 不带 namespace，
+    # 所以路径就是 ``$HF_LEROBOT_HOME/tianji_pico_filp_box_over_clean/``。
+    # 跑训练前 export ``HF_LEROBOT_HOME=/mnt/kpfs_juice/liuzijian/data/lerobot``。
+    #
+    # EE-only（默认推荐）：state=20D，action_dim=32。
+    TrainConfig(
+        name="pi05_tianji_flip_box",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=50),
+        data=LeRobotTianjiDataConfig(
+            repo_id="tianji_pico_filp_box_over_clean",
+            base_config=DataConfig(prompt_from_task=True),
+            state_mode="ee",
+        ),
+        batch_size=160,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
+    # LoRA 低显存版（单卡 H200 / 4090 跑得动）。EE-only，state=20D，action_dim=32 默认值。
+    TrainConfig(
+        name="pi05_tianji_flip_box_low_mem_finetune",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotTianjiDataConfig(
+            repo_id="tianji_pico_filp_box_over_clean",
+            base_config=DataConfig(prompt_from_task=True),
+            state_mode="ee",
+        ),
+        batch_size=32,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    # Joint-only：state=16D（14 关节 + 2 grippers），action_dim=32。action 仍是 20D EE。
+    TrainConfig(
+        name="pi05_tianji_flip_box_joint",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=50),
+        data=LeRobotTianjiDataConfig(
+            repo_id="tianji_pico_filp_box_over_clean",
+            base_config=DataConfig(prompt_from_task=True),
+            state_mode="joint",
+        ),
+        batch_size=160,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
+    # Both：state=34D（全要），action_dim 拉到 64 才装得下。
+    # 一般任务 EE-only 就够；这个版本留给「需要关节信号 + 仍想保留 EE 观测」的复杂任务。
+    TrainConfig(
+        name="pi05_tianji_flip_box_both",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=64, action_horizon=50),
+        data=LeRobotTianjiDataConfig(
+            repo_id="tianji_pico_filp_box_over_clean",
+            base_config=DataConfig(prompt_from_task=True),
+            state_mode="both",
+        ),
+        batch_size=160,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
     ),
     #
