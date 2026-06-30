@@ -911,6 +911,33 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
     ),
+    # Joint-only LoRA：观测只用关节/夹爪，action 仍是 EE 绝对量；适合先快速验证 joint state 是否更稳。
+    TrainConfig(
+        name="pi05_tianji_flip_box_joint_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotTianjiDataConfig(
+            repo_id="tianji_pico_filp_box_over_clean",
+            base_config=DataConfig(prompt_from_task=True),
+            state_mode="joint",
+        ),
+        batch_size=32,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
     # Both：state=34D（全要），action_dim 拉到 64 才装得下。
     # 一般任务 EE-only 就够；这个版本留给「需要关节信号 + 仍想保留 EE 观测」的复杂任务。
     TrainConfig(
