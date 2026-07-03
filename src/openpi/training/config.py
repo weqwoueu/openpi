@@ -360,17 +360,18 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 class LeRobotTianjiDataConfig(DataConfigFactory):
     """天机 bi_tianji_marvin pico 录制数据集 → pi0/pi05 训练 pipeline。
 
-    LeRobot 数据集字段（recorded by ``run_record_tianji_pico.sh`` w/ ACTION_MODE=absolute）：
-      - observation.images.cam_high            (480, 640, 3)
-      - observation.images.cam_left_wrist      (480, 640, 3)
-      - observation.images.cam_right_wrist     (480, 640, 3)
-      - observation.state    34D  关节角(14) + 左 ee(9) + 右 ee(9) + grippers(2)
-      - action               20D  左 ee(xyz+r6d)+trigger + 右 ee(xyz+r6d)+trigger
+    LeRobot 数据集字段（新 30D 同构 schema，见 ``run_record_tianji_pico.sh``）：
+      - observation.images.cam_high            (640, 480, 3)
+      - observation.images.cam_left_wrist      (640, 480, 3)  # 采集时已旋转 90°，H/W 互换
+      - observation.images.cam_right_wrist     (640, 480, 3)  # 同上
+      - observation.state    30D   每侧 15D = ee_xyz(mm) + ee_quat(xyzw) + 7 joints(deg) + trigger
+      - action               30D   同 observation.state 结构
 
-    ``state_mode``:
-      - "ee"   （默认）20D：左右末端(xyz+r6d) + grippers，跟 action 同 schema，``action_dim=32`` 即可
-      - "joint"        16D：左右关节角(deg) + grippers，``action_dim=32`` 即可
-      - "both"         34D：全要，要求 ``action_dim ≥ 34``（建议 64）
+    ``TianjiInputs`` 会把 30D 缩到 model 侧：
+      - action 恒 20D EE（xyz(m)+r6d+trigger 每侧 10D）—— 跟推理客户端 20D 契约对齐
+      - state 由 ``state_mode`` 决定：
+          "ee"    （默认）20D：跟 action 同 schema
+          "joint" 16D：每侧 7 关节角(deg) + trigger（丢 ee 信息）
     """
 
     state_mode: tianji_policy.StateMode = "ee"
@@ -832,6 +833,36 @@ _CONFIGS = [
     # 跑训练前 export ``HF_LEROBOT_HOME=/mnt/kpfs_juice/liuzijian/data/lerobot``。
     #
     # EE-only（默认推荐）：state=20D，action_dim=32。
+    #
+    # ---- 新 config 模板（拷贝到 _CONFIGS 里再改，不要留在这里当字符串！）----
+    # TrainConfig(
+    #     name="pi05_tianji_<你的实验名>",      # 唯一，一个实验一个名字
+    #     model=pi0_config.Pi0Config(
+    #         pi05=True,
+    #         action_dim=32,                     # ≥ 你 action 维（我们 20D）→ 32 默认足够
+    #         action_horizon=50,                 # chunk 长度
+    #         # 下面两行仅 LoRA 要，全量微调不要
+    #         paligemma_variant="gemma_2b_lora",
+    #         action_expert_variant="gemma_300m_lora",
+    #     ),
+    #     data=LeRobotTianjiDataConfig(
+    #         repo_id="<你的数据集文件夹名>",     # $HF_LEROBOT_HOME/<repo_id>
+    #         base_config=DataConfig(prompt_from_task=True),
+    #         state_mode="ee",                   # "ee" 或 "joint"
+    #     ),
+    #     batch_size=160,                        # 全量 160；LoRA 32
+    #     weight_loader=weight_loaders.CheckpointWeightLoader(
+    #         "gs://openpi-assets/checkpoints/pi05_base/params"
+    #     ),
+    #     num_train_steps=30_000,
+    #     # 下面两行仅 LoRA 要，freeze_filter 里 Pi0Config 参数必须跟外层 model= 完全一致
+    #     freeze_filter=pi0_config.Pi0Config(
+    #         pi05=True, action_dim=32, action_horizon=50,
+    #         paligemma_variant="gemma_2b_lora",
+    #         action_expert_variant="gemma_300m_lora",
+    #     ).get_freeze_filter(),
+    #     ema_decay=None,                        # LoRA 必须 None；全量默认走 config 默认
+    # ),
     TrainConfig(
         name="pi05_tianji_flip_box",
         model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=50),
@@ -937,20 +968,6 @@ _CONFIGS = [
             action_expert_variant="gemma_300m_lora",
         ).get_freeze_filter(),
         ema_decay=None,
-    ),
-    # Both：state=34D（全要），action_dim 拉到 64 才装得下。
-    # 一般任务 EE-only 就够；这个版本留给「需要关节信号 + 仍想保留 EE 观测」的复杂任务。
-    TrainConfig(
-        name="pi05_tianji_flip_box_both",
-        model=pi0_config.Pi0Config(pi05=True, action_dim=64, action_horizon=50),
-        data=LeRobotTianjiDataConfig(
-            repo_id="tianji_pico_filp_box_over_clean",
-            base_config=DataConfig(prompt_from_task=True),
-            state_mode="both",
-        ),
-        batch_size=160,
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=30_000,
     ),
     #
     # Fine-tuning Aloha configs.

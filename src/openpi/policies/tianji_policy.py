@@ -1,66 +1,143 @@
 """天机双臂（bi_tianji_marvin）+ LeRobot dataset 的 pi0/pi05 policy 适配。
 
-- dataset.observation.state: 34D = 14 关节角(deg) + 9 左末端(xyz+r6d) + 9 右末端(xyz+r6d) + 2 grippers
-- dataset.action:             20D = 3 左 xyz + 6 左 r6d + 1 trigger + 3 右 xyz + 6 右 r6d + 1 trigger
-- 摄像头键名: observation.images.cam_high / .cam_left_wrist / .cam_right_wrist
+数据集 schema（新 30D 同构 obs / action）
+=======================================
+- ``observation.state`` = 30D，双臂对称，每侧 15D：
 
-``state_mode`` 选择喂给模型的 state schema：
-  - "ee"    （默认）20D：left ee + left gripper + right ee + right gripper，跟 action 左右顺序一致
-  - "joint"        16D：左右 7 关节角(deg) + grippers
-  - "both"         34D：全要（要求 model.action_dim ≥ 34）
+    [ 0.. 2]  ee_x / y / z          —— mm，SDK 原生单位
+    [ 3.. 6]  ee_qx / qy / qz / qw  —— 四元数（scipy xyzw）
+    [ 7..13]  joint_1 .. joint_7    —— deg
+    [14]      trigger               —— [0, 1]
+
+- ``action`` = 30D，格式跟 ``observation.state`` 完全一致。
+
+送给 model 的 schema（老 20D EE-r6d，跟 robot ``_absolute_T`` 的 r6d fallback 对齐）
+================================================================================
+- action 恒为 **20D EE**（每侧 10D）：
+
+    [0..2]  x / y / z    —— m（数据集 mm → ÷1000）
+    [3..8]  r6d_1..6     —— 由 quat 转矩阵前两列
+    [9]     trigger
+
+- state 有两档，``state_mode``:
+
+    - "ee"    （默认）20D EE：跟 action 同 schema
+    - "joint" 16D：每侧 7 joints(deg) + 1 trigger（丢 ee 信息）
+
+``both`` 模式已废弃，不再支持。
 """
+
+from __future__ import annotations
 
 import dataclasses
 from typing import Literal
 
 import einops
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 
 from openpi import transforms
 from openpi.models import model as _model
 
-# 数据集里 action 实际维度，model 内部会 pad 到 model_config.action_dim
+# ---- 数据集常量 ----------------------------------------------------------
+
+_PER_SIDE_DIMS = 15
+_EE_XYZ_DIMS = 3        # v15[0:3]  ee 平移 (mm)
+_EE_QUAT_DIMS = 4       # v15[3:7]  ee 四元数 (xyzw)
+_JOINT_DIMS = 7         # v15[7:14] 关节角 (deg)
+_TRIGGER_IDX = 14       # v15[14]   trigger
+
+_MM_TO_M = 1e-3
+
+# ---- Model 侧维度 --------------------------------------------------------
+# action 恒 20D EE（每侧 10D：xyz(3) + r6d(6) + trigger(1)），跟推理客户端契约一致。
 TIANJI_ACTION_DIM = 20
-# state 维度布局：[14 关节] + [9 左 ee] + [9 右 ee] + [2 grippers]
-_JOINT_DIMS = 14
-_EE_DIMS = 18  # 左 9 + 右 9
-_GRIPPER_DIMS = 2
 
-StateMode = Literal["ee", "joint", "both"]
+StateMode = Literal["ee", "joint"]
 
 
-def _select_state(full_state: np.ndarray, mode: StateMode) -> np.ndarray:
-    """按 state_mode 从 34D dataset state 里抽出送给 model 的 state。"""
-    if mode == "both":
-        return full_state
+# ---- 单侧 15D → 10D / 8D 缩减 ---------------------------------------------
+
+
+def _quat_to_r6d(quat_xyzw: np.ndarray) -> np.ndarray:
+    """quat (..., 4, xyzw) → r6d (..., 6)（旋转矩阵前两列拼接，Zhou et al. 2019）。"""
+    q = np.asarray(quat_xyzw, dtype=np.float64)
+    orig_shape = q.shape[:-1]
+    q_flat = q.reshape(-1, 4)
+    rotmat = R.from_quat(q_flat).as_matrix()  # (N, 3, 3)
+    col0 = rotmat[:, :, 0]  # (N, 3)
+    col1 = rotmat[:, :, 1]  # (N, 3)
+    r6d_flat = np.concatenate([col0, col1], axis=-1)  # (N, 6)
+    return r6d_flat.reshape(*orig_shape, 6)
+
+
+def _side_to_ee_r6d(v15: np.ndarray) -> np.ndarray:
+    """单侧 15D (mm + quat + joints + trigger) → 10D (m + r6d + trigger)。支持 batch。"""
+    v = np.asarray(v15, dtype=np.float32)
+    xyz_m = v[..., 0:_EE_XYZ_DIMS] * _MM_TO_M
+    quat = v[..., _EE_XYZ_DIMS : _EE_XYZ_DIMS + _EE_QUAT_DIMS]
+    r6d = _quat_to_r6d(quat).astype(np.float32)
+    trigger = v[..., _TRIGGER_IDX : _TRIGGER_IDX + 1]
+    return np.concatenate([xyz_m, r6d, trigger], axis=-1)
+
+
+def _side_to_joint(v15: np.ndarray) -> np.ndarray:
+    """单侧 15D → 8D (7 joints + 1 trigger)。丢 ee。"""
+    v = np.asarray(v15, dtype=np.float32)
+    joints = v[..., 7 : 7 + _JOINT_DIMS]
+    trigger = v[..., _TRIGGER_IDX : _TRIGGER_IDX + 1]
+    return np.concatenate([joints, trigger], axis=-1)
+
+
+# ---- 双臂 30D 缩减 --------------------------------------------------------
+
+
+def _reduce_state_30d(v30: np.ndarray, mode: StateMode) -> np.ndarray:
+    """双臂 30D state → 送给 model 的 state。
+
+    - ``mode="ee"``:    30 → 20（每侧 10D）
+    - ``mode="joint"``: 30 → 16（每侧 8D）
+    """
+    v = np.asarray(v30, dtype=np.float32)
+    left = v[..., 0:_PER_SIDE_DIMS]
+    right = v[..., _PER_SIDE_DIMS : 2 * _PER_SIDE_DIMS]
     if mode == "ee":
-        # 重排成跟 action 一样的左右结构：
-        # left ee(9), left gripper, right ee(9), right gripper → 20D
-        left_ee_start = _JOINT_DIMS
-        right_ee_start = _JOINT_DIMS + 9
-        gripper_start = _JOINT_DIMS + _EE_DIMS
-        return np.concatenate(
-            [
-                full_state[..., left_ee_start : left_ee_start + 9],
-                full_state[..., gripper_start : gripper_start + 1],
-                full_state[..., right_ee_start : right_ee_start + 9],
-                full_state[..., gripper_start + 1 : gripper_start + 2],
-            ],
-            axis=-1,
-        )
+        return np.concatenate([_side_to_ee_r6d(left), _side_to_ee_r6d(right)], axis=-1)
     if mode == "joint":
-        # 留前 14 维关节 + 末尾 2 维 grippers，丢中间 18 维 ee → 16D
-        joints = full_state[..., :_JOINT_DIMS]
-        grippers = full_state[..., _JOINT_DIMS + _EE_DIMS:]
-        return np.concatenate([joints, grippers], axis=-1)
-    raise ValueError(f"state_mode 须为 'ee' | 'joint' | 'both'，实际为 {mode!r}")
+        return np.concatenate([_side_to_joint(left), _side_to_joint(right)], axis=-1)
+    raise ValueError(f"state_mode 须为 'ee' 或 'joint'，实际为 {mode!r}")
+
+
+def _reduce_action_30d(a30: np.ndarray) -> np.ndarray:
+    """双臂 30D action → 20D EE（无论 state_mode，action 恒 EE 格式）。
+
+    支持 (30,) 单帧、(H, 30) chunk、(B, H, 30) batched chunk。
+    """
+    a = np.asarray(a30, dtype=np.float32)
+    left = a[..., 0:_PER_SIDE_DIMS]
+    right = a[..., _PER_SIDE_DIMS : 2 * _PER_SIDE_DIMS]
+    return np.concatenate([_side_to_ee_r6d(left), _side_to_ee_r6d(right)], axis=-1)
+
+
+# ---- 测试样本 -------------------------------------------------------------
 
 
 def make_tianji_example() -> dict:
-    """Random example for testing the input pipeline."""
+    """随机 example 用来测试 pipeline。obs.state 30D 新格式。"""
+    state = np.zeros(30, dtype=np.float32)
+    for side_start in (0, 15):
+        # xyz mm
+        state[side_start : side_start + 3] = np.random.uniform(-500, 500, 3)
+        # quat（保证归一化）
+        q = np.random.randn(4)
+        q = q / np.linalg.norm(q)
+        state[side_start + 3 : side_start + 7] = q
+        # joints deg
+        state[side_start + 7 : side_start + 14] = np.random.uniform(-120, 120, 7)
+        # trigger
+        state[side_start + 14] = np.random.rand()
     return {
-        # 34D: 14 joints + 9 left ee + 9 right ee + 2 grippers，ee mode 会重排成 action 左右顺序。
-        "observation/state": np.random.rand(34).astype(np.float32),
+        "observation/state": state,
         "observation/image": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
         "observation/wrist_image_left": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
         "observation/wrist_image_right": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
@@ -77,14 +154,18 @@ def _parse_image(image) -> np.ndarray:
     return image
 
 
+# ---- Transforms ----------------------------------------------------------
+
+
 @dataclasses.dataclass(frozen=True)
 class TianjiInputs(transforms.DataTransformFn):
-    """LeRobot tianji frame -> model 输入。
+    """LeRobot tianji 30D frame → model 输入（state 20D 或 16D，action 20D EE）。
 
     ``state_mode``:
-      - "ee"   （默认）20D：left ee + left gripper + right ee + right gripper，跟 action 左右顺序一致
-      - "joint"        16D：左右 7 关节角(deg) + grippers
-      - "both"         34D：全部信息（要 model.action_dim ≥ 34）
+      - "ee"    （默认）20D：每侧 10D = xyz(m) + r6d + trigger，跟 action 同 schema
+      - "joint" 16D：每侧 8D = 7 joints(deg) + trigger（丢 ee 信息）
+
+    ``action`` 无论哪个 state_mode，都是 20D EE 格式（模型学的、推理客户端拿到的都是这个）。
     """
 
     model_type: _model.ModelType
@@ -95,8 +176,13 @@ class TianjiInputs(transforms.DataTransformFn):
         wrist_image_left = _parse_image(data["observation/wrist_image_left"])
         wrist_image_right = _parse_image(data["observation/wrist_image_right"])
 
-        full_state = np.asarray(data["observation/state"])
-        state = _select_state(full_state, self.state_mode)
+        full_state_30d = np.asarray(data["observation/state"])
+        if full_state_30d.shape[-1] != 30:
+            raise ValueError(
+                f"observation/state 期望 30D（新 obs schema），实际 {full_state_30d.shape[-1]}D。"
+                " 是否忘了重新录数据 / 用了老 34D 数据集？"
+            )
+        state = _reduce_state_30d(full_state_30d, self.state_mode)
 
         inputs = {
             "state": state,
@@ -113,7 +199,12 @@ class TianjiInputs(transforms.DataTransformFn):
         }
 
         if "actions" in data:
-            inputs["actions"] = data["actions"]
+            actions_30d = np.asarray(data["actions"])
+            if actions_30d.shape[-1] != 30:
+                raise ValueError(
+                    f"actions 期望 30D（新 action schema），实际 {actions_30d.shape[-1]}D。"
+                )
+            inputs["actions"] = _reduce_action_30d(actions_30d)
 
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
@@ -123,7 +214,11 @@ class TianjiInputs(transforms.DataTransformFn):
 
 @dataclasses.dataclass(frozen=True)
 class TianjiOutputs(transforms.DataTransformFn):
-    """model 输出 -> 前 20 维（剩余是 pad）。"""
+    """model 输出 → 前 20 维 EE action（剩余是 pad）。
+
+    输出 schema 跟推理客户端 ``_ACTION_KEYS``、robot 的 ``_absolute_T`` r6d 分支完全对齐：
+    left_x / y / z / r6d_1..6 / trigger + right 同顺序 = 20D。
+    """
 
     def __call__(self, data: dict) -> dict:
         return {"actions": np.asarray(data["actions"][..., :TIANJI_ACTION_DIM])}
