@@ -864,6 +864,22 @@ _CONFIGS = [
     #     ema_decay=None,                        # LoRA 必须 None；全量默认走 config 默认
     # ),
     TrainConfig(
+        name="pi05_tianji_catch_box",  # 唯一，一个实验一个名字
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,  # ≥ 你 action 维（我们 20D）→ 32 默认足够
+            action_horizon=50,  # chunk 长度
+        ),
+        data=LeRobotTianjiDataConfig(
+            repo_id="tianji_pico_catch_box_v2",  # $HF_LEROBOT_HOME/<repo_id>
+            base_config=DataConfig(prompt_from_task=True),
+            state_mode="ee",  # "ee" 或 "joint"
+        ),
+        batch_size=480,  # 全量 160；LoRA 32
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=50000,
+    ),
+    TrainConfig(
         name="pi05_tianji_flip_box",
         model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=50),
         data=LeRobotTianjiDataConfig(
