@@ -119,6 +119,41 @@ def _reduce_action_30d(a30: np.ndarray) -> np.ndarray:
     return np.concatenate([_side_to_ee_r6d(left), _side_to_ee_r6d(right)], axis=-1)
 
 
+# ---- 34D r6d 兼容分支（仅推理路径） --------------------------------------
+# robocoin 推理客户端 ``_STATE_KEYS`` 的排布（xyz 已是 m，rotation 已是 r6d）：
+#   [ 0.. 6]  left_joint_1..7_pos  (deg)
+#   [ 7..13]  right_joint_1..7_pos (deg)
+#   [14..16]  left_ee_x/y/z         (m)
+#   [17..22]  left_ee_r6d_1..6
+#   [23..25]  right_ee_x/y/z        (m)
+#   [26..31]  right_ee_r6d_1..6
+#   [32]      left_gripper
+#   [33]      right_gripper
+# 30D 训练路径出的 20D = [xyz_L(m), r6d_L, trig_L, xyz_R(m), r6d_R, trig_R]，
+# 这里 34D 直接切片拼装出数值等价的 20D，无需 quat→r6d / mm→m 转换。
+
+
+def _reduce_state_34d_r6d(v34: np.ndarray, mode: StateMode) -> np.ndarray:
+    """双臂 34D r6d state（推理端 obs）→ 送给 model 的 state。
+
+    输出跟 :func:`_reduce_state_30d` 数值等价，用来兼容还没升级到 30D 输出的推理客户端。
+    """
+    v = np.asarray(v34, dtype=np.float32)
+    if mode == "ee":
+        left = np.concatenate(
+            [v[..., 14:17], v[..., 17:23], v[..., 32:33]], axis=-1
+        )
+        right = np.concatenate(
+            [v[..., 23:26], v[..., 26:32], v[..., 33:34]], axis=-1
+        )
+        return np.concatenate([left, right], axis=-1)
+    if mode == "joint":
+        left = np.concatenate([v[..., 0:7], v[..., 32:33]], axis=-1)
+        right = np.concatenate([v[..., 7:14], v[..., 33:34]], axis=-1)
+        return np.concatenate([left, right], axis=-1)
+    raise ValueError(f"state_mode 须为 'ee' 或 'joint'，实际为 {mode!r}")
+
+
 # ---- 测试样本 -------------------------------------------------------------
 
 
@@ -176,13 +211,18 @@ class TianjiInputs(transforms.DataTransformFn):
         wrist_image_left = _parse_image(data["observation/wrist_image_left"])
         wrist_image_right = _parse_image(data["observation/wrist_image_right"])
 
-        full_state_30d = np.asarray(data["observation/state"])
-        if full_state_30d.shape[-1] != 30:
+        full_state = np.asarray(data["observation/state"])
+        dim = full_state.shape[-1]
+        if dim == 30:
+            # 训练路径：数据集 30D (mm + quat + joints + trigger)
+            state = _reduce_state_30d(full_state, self.state_mode)
+        elif dim == 34:
+            # 推理路径：robocoin 客户端 34D (m + r6d + joints + gripper)，直接切片拼装
+            state = _reduce_state_34d_r6d(full_state, self.state_mode)
+        else:
             raise ValueError(
-                f"observation/state 期望 30D（新 obs schema），实际 {full_state_30d.shape[-1]}D。"
-                " 是否忘了重新录数据 / 用了老 34D 数据集？"
+                f"observation/state 期望 30D（训练）或 34D（推理），实际 {dim}D。"
             )
-        state = _reduce_state_30d(full_state_30d, self.state_mode)
 
         inputs = {
             "state": state,
