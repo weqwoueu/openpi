@@ -221,7 +221,13 @@ class Pi0(_model.BaseModel):
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
+        guidance_actions: at.Float[at.Array, "b ah ad"] | None = None,
+        guidance_weights: at.Float[at.Array, "b ah"] | None = None,
+        max_guidance_weight: float = 5.0,
     ) -> _model.Actions:
+        if (guidance_actions is None) != (guidance_weights is None):
+            raise ValueError("guidance_actions 和 guidance_weights 必须同时提供。")
+
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
@@ -236,8 +242,7 @@ class Pi0(_model.BaseModel):
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
 
-        def step(carry):
-            x_t, time = carry
+        def denoise(x_t, time):
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
                 observation, x_t, jnp.broadcast_to(time, batch_size)
             )
@@ -266,14 +271,38 @@ class Pi0(_model.BaseModel):
                 adarms_cond=[None, adarms_cond],
             )
             assert prefix_out is None
-            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            return self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
+        def step(carry):
+            x_t, time = carry
+            v_t = denoise(x_t, time)
             return x_t + dt * v_t, time + dt
+
+        def rtc_step(carry):
+            x_t, time = carry
+
+            def predict_action(current_x_t):
+                v_t = denoise(current_x_t, time)
+                # openpi samples from t=1 noise to t=0 actions.
+                return current_x_t - time * v_t, v_t
+
+            predicted_actions, pullback, v_t = jax.vjp(predict_action, x_t, has_aux=True)
+            error = (guidance_actions - predicted_actions) * guidance_weights[..., None]
+            correction = pullback(error)[0]
+
+            # RTC's reference implementation uses the opposite time direction.
+            rtc_time = 1.0 - time
+            inv_r2 = (rtc_time**2 + time**2) / (time**2)
+            coefficient = jnp.nan_to_num(time / rtc_time, posinf=max_guidance_weight)
+            weight = jnp.minimum(coefficient * inv_r2, max_guidance_weight)
+            guided_v_t = v_t - weight * correction
+            return x_t + dt * guided_v_t.astype(x_t.dtype), time + dt
 
         def cond(carry):
             x_t, time = carry
             # robust to floating-point error
             return time >= -dt / 2
 
-        x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
+        sampler_step = rtc_step if guidance_actions is not None else step
+        x_0, _ = jax.lax.while_loop(cond, sampler_step, (noise, 1.0))
         return x_0

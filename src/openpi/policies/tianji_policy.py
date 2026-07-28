@@ -238,7 +238,14 @@ class TianjiInputs(transforms.DataTransformFn):
             },
         }
 
-        if "actions" in data:
+        if "rtc_actions" in data:
+            rtc_actions = np.asarray(data["rtc_actions"], dtype=np.float32)
+            if rtc_actions.shape[-1] != TIANJI_ACTION_DIM:
+                raise ValueError(
+                    f"rtc_actions 期望 {TIANJI_ACTION_DIM}D EE 动作，实际 {rtc_actions.shape[-1]}D。"
+                )
+            inputs["actions"] = rtc_actions
+        elif "actions" in data:
             actions_30d = np.asarray(data["actions"])
             if actions_30d.shape[-1] != 30:
                 raise ValueError(

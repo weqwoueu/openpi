@@ -66,9 +66,31 @@ class Policy(BasePolicy):
 
     @override
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
+        policy_inputs = dict(obs)
+        rtc_guidance_weights = policy_inputs.pop("rtc_guidance_weights", None)
+        rtc_num_steps = policy_inputs.pop("rtc_num_steps", None)
+        rtc_max_guidance_weight = policy_inputs.pop("rtc_max_guidance_weight", None)
+        rtc_enabled = "rtc_actions" in policy_inputs
+        rtc_fields = (
+            rtc_guidance_weights is not None,
+            rtc_num_steps is not None,
+            rtc_max_guidance_weight is not None,
+        )
+        if not (rtc_enabled == rtc_fields[0] == rtc_fields[1] == rtc_fields[2]):
+            raise ValueError(
+                "RTC 请求必须同时提供 rtc_actions、rtc_guidance_weights、"
+                "rtc_num_steps 和 rtc_max_guidance_weight。"
+            )
+        if rtc_enabled and self._is_pytorch_model:
+            raise ValueError("Inference-time RTC 当前只支持 JAX Pi0/Pi0.5 模型。")
+
         # Make a copy since transformations may modify the inputs in place.
-        inputs = jax.tree.map(lambda x: x, obs)
+        inputs = jax.tree.map(lambda x: x, policy_inputs)
         inputs = self._input_transform(inputs)
+        guidance_actions = inputs.pop("actions", None) if rtc_enabled else None
+        if rtc_enabled and guidance_actions is None:
+            raise ValueError("当前 policy input transform 不支持 rtc_actions。")
+
         if not self._is_pytorch_model:
             # Make a batch and convert to jax.Array.
             inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
@@ -80,6 +102,39 @@ class Policy(BasePolicy):
 
         # Prepare kwargs for sample_actions
         sample_kwargs = dict(self._sample_kwargs)
+        if rtc_enabled:
+            guidance_actions_np = np.asarray(guidance_actions)
+            expected_action_shape = (self._model.action_horizon, self._model.action_dim)
+            if guidance_actions_np.shape != expected_action_shape:
+                raise ValueError(
+                    f"RTC guidance actions shape {guidance_actions_np.shape}，"
+                    f"期望 {expected_action_shape}。"
+                )
+            if not np.all(np.isfinite(guidance_actions_np)):
+                raise ValueError("RTC guidance actions 包含 NaN 或 Inf。")
+            guidance_actions = jnp.asarray(guidance_actions_np)[np.newaxis, ...]
+            guidance_weights_np = np.asarray(rtc_guidance_weights, dtype=np.float32)
+            if not np.all(np.isfinite(guidance_weights_np)):
+                raise ValueError("rtc_guidance_weights 包含 NaN 或 Inf。")
+            if np.any((guidance_weights_np < 0) | (guidance_weights_np > 1)):
+                raise ValueError("rtc_guidance_weights 必须在 [0, 1] 范围内。")
+            guidance_weights = jnp.asarray(guidance_weights_np)
+            if guidance_weights.shape != guidance_actions.shape[-2:-1]:
+                raise ValueError(
+                    "rtc_guidance_weights shape "
+                    f"{guidance_weights.shape} 与动作 horizon {guidance_actions.shape[-2]} 不匹配。"
+                )
+            if int(rtc_num_steps) <= 0:
+                raise ValueError("rtc_num_steps 必须大于 0。")
+            rtc_max_guidance_weight = float(rtc_max_guidance_weight)
+            if not np.isfinite(rtc_max_guidance_weight) or rtc_max_guidance_weight <= 0:
+                raise ValueError("rtc_max_guidance_weight 必须大于 0。")
+            sample_kwargs.update(
+                guidance_actions=guidance_actions,
+                guidance_weights=guidance_weights[np.newaxis, ...],
+                max_guidance_weight=rtc_max_guidance_weight,
+                num_steps=int(rtc_num_steps),
+            )
         if noise is not None:
             noise = torch.from_numpy(noise).to(self._pytorch_device) if self._is_pytorch_model else jnp.asarray(noise)
 
