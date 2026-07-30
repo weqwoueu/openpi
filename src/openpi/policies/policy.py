@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+import enum
 import logging
 import pathlib
 import time
@@ -21,6 +22,12 @@ from openpi.shared import nnx_utils
 BasePolicy: TypeAlias = _base_policy.BasePolicy
 
 
+class RtcMode(enum.Enum):
+    AUTO = "auto"
+    INFERENCE_TIME = "inference_time"
+    TRAINING_TIME = "training_time"
+
+
 class Policy(BasePolicy):
     def __init__(
         self,
@@ -33,6 +40,7 @@ class Policy(BasePolicy):
         metadata: dict[str, Any] | None = None,
         pytorch_device: str = "cpu",
         is_pytorch: bool = False,
+        rtc_mode: RtcMode = RtcMode.AUTO,
     ):
         """Initialize the Policy.
 
@@ -54,6 +62,24 @@ class Policy(BasePolicy):
         self._metadata = metadata or {}
         self._is_pytorch_model = is_pytorch
         self._pytorch_device = pytorch_device
+        self._train_time_rtc = bool(getattr(model, "train_time_rtc", False))
+        rtc_max_delay_steps = getattr(model, "rtc_max_delay_steps", None)
+        self._rtc_max_delay_steps = (
+            int(rtc_max_delay_steps) if self._train_time_rtc and rtc_max_delay_steps is not None else None
+        )
+        self._rtc_mode = RtcMode.TRAINING_TIME if rtc_mode is RtcMode.AUTO and self._train_time_rtc else rtc_mode
+        if self._rtc_mode is RtcMode.AUTO:
+            self._rtc_mode = RtcMode.INFERENCE_TIME
+        if self._rtc_mode is RtcMode.TRAINING_TIME and not self._train_time_rtc:
+            raise ValueError("rtc_mode=training_time requires a policy config with model.train_time_rtc=True.")
+        if self._rtc_mode is RtcMode.TRAINING_TIME and self._is_pytorch_model:
+            raise ValueError("Training-time RTC sampling currently only supports JAX Pi0/Pi0.5 models.")
+        self._metadata = {
+            **self._metadata,
+            "rtc_mode": self._rtc_mode.value,
+            "train_time_rtc": self._train_time_rtc,
+            "rtc_max_delay_steps": self._rtc_max_delay_steps,
+        }
 
         if self._is_pytorch_model:
             self._model = self._model.to(pytorch_device)
@@ -70,19 +96,16 @@ class Policy(BasePolicy):
         rtc_guidance_weights = policy_inputs.pop("rtc_guidance_weights", None)
         rtc_num_steps = policy_inputs.pop("rtc_num_steps", None)
         rtc_max_guidance_weight = policy_inputs.pop("rtc_max_guidance_weight", None)
+        rtc_prefix_length = policy_inputs.pop("rtc_prefix_length", None)
         rtc_enabled = "rtc_actions" in policy_inputs
-        rtc_fields = (
-            rtc_guidance_weights is not None,
-            rtc_num_steps is not None,
-            rtc_max_guidance_weight is not None,
+        rtc_control_enabled = any(
+            value is not None
+            for value in (rtc_guidance_weights, rtc_num_steps, rtc_max_guidance_weight, rtc_prefix_length)
         )
-        if not (rtc_enabled == rtc_fields[0] == rtc_fields[1] == rtc_fields[2]):
-            raise ValueError(
-                "RTC 请求必须同时提供 rtc_actions、rtc_guidance_weights、"
-                "rtc_num_steps 和 rtc_max_guidance_weight。"
-            )
+        if rtc_enabled != rtc_control_enabled:
+            raise ValueError("RTC request control fields must be provided together with rtc_actions.")
         if rtc_enabled and self._is_pytorch_model:
-            raise ValueError("Inference-time RTC 当前只支持 JAX Pi0/Pi0.5 模型。")
+            raise ValueError("RTC sampling currently only supports JAX Pi0/Pi0.5 models.")
 
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, policy_inputs)
@@ -103,38 +126,55 @@ class Policy(BasePolicy):
         # Prepare kwargs for sample_actions
         sample_kwargs = dict(self._sample_kwargs)
         if rtc_enabled:
+            if rtc_num_steps is None or int(rtc_num_steps) <= 0:
+                raise ValueError("rtc_num_steps must be greater than zero.")
             guidance_actions_np = np.asarray(guidance_actions)
             expected_action_shape = (self._model.action_horizon, self._model.action_dim)
             if guidance_actions_np.shape != expected_action_shape:
                 raise ValueError(
-                    f"RTC guidance actions shape {guidance_actions_np.shape}，"
-                    f"期望 {expected_action_shape}。"
+                    f"RTC guidance actions shape {guidance_actions_np.shape}, expected {expected_action_shape}."
                 )
             if not np.all(np.isfinite(guidance_actions_np)):
-                raise ValueError("RTC guidance actions 包含 NaN 或 Inf。")
+                raise ValueError("RTC guidance actions contain NaN or Inf.")
             guidance_actions = jnp.asarray(guidance_actions_np)[np.newaxis, ...]
-            guidance_weights_np = np.asarray(rtc_guidance_weights, dtype=np.float32)
-            if not np.all(np.isfinite(guidance_weights_np)):
-                raise ValueError("rtc_guidance_weights 包含 NaN 或 Inf。")
-            if np.any((guidance_weights_np < 0) | (guidance_weights_np > 1)):
-                raise ValueError("rtc_guidance_weights 必须在 [0, 1] 范围内。")
-            guidance_weights = jnp.asarray(guidance_weights_np)
-            if guidance_weights.shape != guidance_actions.shape[-2:-1]:
-                raise ValueError(
-                    "rtc_guidance_weights shape "
-                    f"{guidance_weights.shape} 与动作 horizon {guidance_actions.shape[-2]} 不匹配。"
+            if self._rtc_mode is RtcMode.TRAINING_TIME:
+                if rtc_prefix_length is None:
+                    raise ValueError("Training-time RTC requests must provide rtc_prefix_length.")
+                prefix_length = int(rtc_prefix_length)
+                if not 0 <= prefix_length < self._model.action_horizon:
+                    raise ValueError(
+                        f"rtc_prefix_length must be in [0, {self._model.action_horizon}), got {prefix_length}."
+                    )
+                sample_kwargs.update(
+                    guidance_actions=guidance_actions,
+                    prefix_lengths=jnp.asarray([prefix_length], dtype=jnp.int32),
+                    num_steps=int(rtc_num_steps),
                 )
-            if int(rtc_num_steps) <= 0:
-                raise ValueError("rtc_num_steps 必须大于 0。")
-            rtc_max_guidance_weight = float(rtc_max_guidance_weight)
-            if not np.isfinite(rtc_max_guidance_weight) or rtc_max_guidance_weight <= 0:
-                raise ValueError("rtc_max_guidance_weight 必须大于 0。")
-            sample_kwargs.update(
-                guidance_actions=guidance_actions,
-                guidance_weights=guidance_weights[np.newaxis, ...],
-                max_guidance_weight=rtc_max_guidance_weight,
-                num_steps=int(rtc_num_steps),
-            )
+            else:
+                if rtc_guidance_weights is None or rtc_max_guidance_weight is None:
+                    raise ValueError(
+                        "Inference-time RTC requests must provide rtc_guidance_weights and rtc_max_guidance_weight."
+                    )
+                guidance_weights_np = np.asarray(rtc_guidance_weights, dtype=np.float32)
+                if not np.all(np.isfinite(guidance_weights_np)):
+                    raise ValueError("rtc_guidance_weights contains NaN or Inf.")
+                if np.any((guidance_weights_np < 0) | (guidance_weights_np > 1)):
+                    raise ValueError("rtc_guidance_weights must be in [0, 1].")
+                guidance_weights = jnp.asarray(guidance_weights_np)
+                if guidance_weights.shape != guidance_actions.shape[-2:-1]:
+                    raise ValueError(
+                        "rtc_guidance_weights shape "
+                        f"{guidance_weights.shape} does not match action horizon {guidance_actions.shape[-2]}."
+                    )
+                max_guidance_weight = float(rtc_max_guidance_weight)
+                if not np.isfinite(max_guidance_weight) or max_guidance_weight <= 0:
+                    raise ValueError("rtc_max_guidance_weight must be greater than zero.")
+                sample_kwargs.update(
+                    guidance_actions=guidance_actions,
+                    guidance_weights=guidance_weights[np.newaxis, ...],
+                    max_guidance_weight=max_guidance_weight,
+                    num_steps=int(rtc_num_steps),
+                )
         if noise is not None:
             noise = torch.from_numpy(noise).to(self._pytorch_device) if self._is_pytorch_model else jnp.asarray(noise)
 

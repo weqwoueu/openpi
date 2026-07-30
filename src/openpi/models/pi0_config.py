@@ -32,6 +32,11 @@ class Pi0Config(_model.BaseModelConfig):
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
+    # Train the flow policy to complete an action chunk from a clean, fixed action prefix.
+    train_time_rtc: bool = False
+    # Largest simulated inference delay, in control steps. The upper bound is included when sampling delays.
+    rtc_max_delay_steps: int = 6
+
     pytorch_compile_mode: str | None = "max-autotune"
 
     def __post_init__(self):
@@ -39,6 +44,11 @@ class Pi0Config(_model.BaseModelConfig):
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
         if self.discrete_state_input is None:
             object.__setattr__(self, "discrete_state_input", self.pi05)
+        if self.train_time_rtc and not 0 <= self.rtc_max_delay_steps < self.action_horizon:
+            raise ValueError(
+                "rtc_max_delay_steps must be in [0, action_horizon) when train_time_rtc is enabled, "
+                f"got {self.rtc_max_delay_steps} for action_horizon={self.action_horizon}."
+            )
         if self.pytorch_compile_mode is not None:
             assert self.pytorch_compile_mode in [
                 "default",

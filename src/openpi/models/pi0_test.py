@@ -1,5 +1,6 @@
 import flax.nnx as nnx
 import jax
+import pytest
 
 import openpi.models.pi0_config as _pi0_config
 
@@ -44,3 +45,11 @@ def test_pi0_all_lora():
     assert len(state) == 17
     assert all("lora" not in p for p in state)
     assert all("llm" in p for p in state)
+
+
+def test_train_time_rtc_delay_validation():
+    with pytest.raises(ValueError, match="rtc_max_delay_steps"):
+        _pi0_config.Pi0Config(train_time_rtc=True, action_horizon=6, rtc_max_delay_steps=6)
+
+    config = _pi0_config.Pi0Config(train_time_rtc=True, action_horizon=6, rtc_max_delay_steps=5)
+    assert config.rtc_max_delay_steps == 5

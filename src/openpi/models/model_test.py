@@ -1,5 +1,7 @@
 from flax import nnx
 import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from openpi.models import model as _model
@@ -37,6 +39,46 @@ def test_pi0_lora_model():
 
     actions = nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=10)
     assert actions.shape == (batch_size, model.action_horizon, model.action_dim)
+
+
+def test_pi05_train_time_rtc_model():
+    key = jax.random.key(0)
+    config = pi0_config.Pi0Config(
+        pi05=True,
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+        action_dim=8,
+        action_horizon=6,
+        max_token_len=16,
+        train_time_rtc=True,
+        rtc_max_delay_steps=3,
+    )
+    model = config.create(key)
+
+    batch_size = 2
+    obs, act = config.fake_obs(batch_size), config.fake_act(batch_size)
+    loss = nnx_utils.module_jit(model.compute_loss)(key, obs, act)
+    assert loss.shape == (batch_size, config.action_horizon)
+    assert np.all(np.isfinite(loss))
+
+    guidance_actions = jnp.arange(batch_size * config.action_horizon * config.action_dim, dtype=jnp.float32)
+    guidance_actions = guidance_actions.reshape(batch_size, config.action_horizon, config.action_dim)
+    prefix_lengths = jnp.asarray([2, 4], dtype=jnp.int32)
+    noise = jnp.zeros_like(guidance_actions)
+    plain_actions = nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=2, noise=noise)
+    assert plain_actions.shape == guidance_actions.shape
+
+    actions = nnx_utils.module_jit(model.sample_actions)(
+        key,
+        obs,
+        num_steps=2,
+        noise=noise,
+        guidance_actions=guidance_actions,
+        prefix_lengths=prefix_lengths,
+    )
+
+    np.testing.assert_array_equal(actions[0, :2], guidance_actions[0, :2])
+    np.testing.assert_array_equal(actions[1, :4], guidance_actions[1, :4])
 
 
 def test_pi0_fast_model():
