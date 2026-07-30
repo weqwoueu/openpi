@@ -893,7 +893,7 @@ _CONFIGS = [
     ),
     # Training-time RTC variant. Use this config name for both training and serving its checkpoints.
     TrainConfig(
-        name="pi05_tianji_flip_box_train_time_rtc",
+        name="pi05_tianji_catch_box_train_time_rtc",
         model=pi0_config.Pi0Config(
             pi05=True,
             action_dim=32,
@@ -906,7 +906,7 @@ _CONFIGS = [
             base_config=DataConfig(prompt_from_task=True),
             state_mode="ee",
         ),
-        batch_size=160,
+        batch_size=180,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
     ),
