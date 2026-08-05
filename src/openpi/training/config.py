@@ -910,6 +910,25 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
     ),
+    # rtc加最新100集翻快递数据
+    TrainConfig(
+        name="pi05_tianji_place_parcels",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            train_time_rtc=True,
+            rtc_max_delay_steps=6,  # Inclusive: samples 0..6 steps, about 0..200 ms at 30 Hz.
+        ),
+        data=LeRobotTianjiDataConfig(
+            repo_id="tianji_pico_place_parcels_v4",
+            base_config=DataConfig(prompt_from_task=True),
+            state_mode="ee",
+        ),
+        batch_size=180,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
     # LoRA 微调版：只训练 LoRA 参数，checkpoint/显存压力比 full fine-tune 小，优先用这个做小数据实验。
     TrainConfig(
         name="pi05_tianji_flip_box_lora",
