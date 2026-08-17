@@ -943,7 +943,7 @@ _CONFIGS = [
             base_config=DataConfig(prompt_from_task=True),
             state_mode="ee",
         ),
-        batch_size=180,
+        batch_size=240,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
     ),
