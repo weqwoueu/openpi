@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.piperx_policy as piperx_policy
 import openpi.policies.tianji_policy as tianji_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
@@ -276,6 +277,64 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotPiperXDataConfig(DataConfigFactory):
+    """Data pipeline for dual-arm PiperX LeRobot datasets with 14D joint actions."""
+
+    use_delta_joint_actions: bool = True
+    prompt_from_task: bool = True
+    default_prompt: str | None = None
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {
+                            "cam_high": "observation.images.cam_high",
+                            "cam_left_wrist": "observation.images.cam_left_wrist",
+                            "cam_right_wrist": "observation.images.cam_right_wrist",
+                        },
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                ),
+                _transforms.NormalizeGripperDims(
+                    gripper_indices=(6, 13),
+                    original_min=0.0,
+                    original_max=0.1,
+                    new_min=0.0,
+                    new_max=1.0,
+                    flip=True,
+                ),
+            ]
+        )
+    )
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[piperx_policy.PiperXInputs()],
+            outputs=[piperx_policy.PiperXOutputs()],
+        )
+        if self.use_delta_joint_actions:
+            delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=ModelTransformFactory(default_prompt=self.default_prompt)(model_config),
+            action_sequence_keys=self.action_sequence_keys,
+            prompt_from_task=self.prompt_from_task,
         )
 
 
@@ -824,6 +883,26 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    # Dual-arm PiperX DAgger fine-tuning with training-time RTC.
+    # Replace repo_id with the merged dataset repo on the training server.
+    TrainConfig(
+        name="pi05_piperx_dagger_train_time_rtc",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            train_time_rtc=True,
+            rtc_max_delay_steps=6,
+        ),
+        data=LeRobotPiperXDataConfig(
+            repo_id="piperx/dagger/piperx_grab_bigbox_yellow_0706_0713",
+        ),
+        batch_size=1120,
+        num_workers=24,
+        keep_period=10_000,
+        num_train_steps=100_000,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
     ),
     #
     # Fine-tuning Tianji (bi_tianji_marvin + Pico) configs.

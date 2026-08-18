@@ -182,6 +182,42 @@ class Unnormalize(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class NormalizeGripperDims(DataTransformFn):
+    """Clips and maps selected physical gripper dimensions to a model interval."""
+
+    gripper_indices: tuple[int, ...] = (6, 13)
+    original_min: float = 0.0
+    original_max: float = 0.1
+    new_min: float = 0.0
+    new_max: float = 1.0
+    flip: bool = True
+
+    def __post_init__(self):
+        if self.original_max <= self.original_min:
+            raise ValueError("original_max must be greater than original_min")
+        if self.new_max <= self.new_min:
+            raise ValueError("new_max must be greater than new_min")
+
+    def __call__(self, data: DataDict) -> DataDict:
+        for key in ("state", "actions"):
+            if key in data:
+                data[key] = self._normalize(np.asarray(data[key]))
+        return data
+
+    def _normalize(self, array: np.ndarray) -> np.ndarray:
+        if array.ndim == 0 or max(self.gripper_indices, default=-1) >= array.shape[-1]:
+            raise ValueError(f"Gripper indices {self.gripper_indices} do not fit array with shape {array.shape}")
+        result = array.copy()
+        values = np.clip(result[..., self.gripper_indices], self.original_min, self.original_max)
+        scale = (self.new_max - self.new_min) / (self.original_max - self.original_min)
+        normalized = self.new_min + (values - self.original_min) * scale
+        if self.flip:
+            normalized = self.new_max - (normalized - self.new_min)
+        result[..., self.gripper_indices] = normalized
+        return result
+
+
+@dataclasses.dataclass(frozen=True)
 class ResizeImages(DataTransformFn):
     height: int
     width: int

@@ -67,6 +67,27 @@ def test_make_bool_mask():
     assert _transforms.make_bool_mask(2, 0, 2) == (True, True, True, True)
 
 
+def test_normalize_gripper_dims_clips_and_flips_state_and_actions():
+    state = np.zeros(14, dtype=np.float32)
+    state[[6, 13]] = [-0.05, 0.1]
+    actions = np.zeros((2, 14), dtype=np.float32)
+    actions[:, 6] = [0.0, 0.05]
+    actions[:, 13] = [0.1, 0.2]
+    item = {"state": state, "actions": actions}
+
+    result = _transforms.NormalizeGripperDims()(item)
+
+    assert np.allclose(result["state"][[6, 13]], [1.0, 0.0])
+    assert np.allclose(result["actions"][:, 6], [1.0, 0.5])
+    assert np.allclose(result["actions"][:, 13], [0.0, 0.0])
+    assert np.count_nonzero(result["state"][:6]) == 0
+
+
+def test_normalize_gripper_dims_rejects_short_vectors():
+    with pytest.raises(ValueError, match="do not fit"):
+        _transforms.NormalizeGripperDims()({"state": np.zeros(13)})
+
+
 def test_tokenize_prompt():
     tokenizer = _tokenizer.PaligemmaTokenizer(max_len=12)
     transform = _transforms.TokenizePrompt(tokenizer)
