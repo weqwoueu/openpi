@@ -11,7 +11,9 @@
 2) 运行本脚本开始采集:
    python example/collect/collect_lerobot_master_slave_teleop.py
 """
+
 import sys
+
 sys.path.append("./")
 import time
 import tty
@@ -32,6 +34,7 @@ from robot.utils.teleop_filter import EmaSlewFilter, FixedRateControlLoop
 def _read_key_nonblocking(timeout: float = 0.1):
     """Read a single keypress if available, otherwise return None."""
     import select
+
     if select.select([sys.stdin], [], [], timeout)[0]:
         return sys.stdin.read(1)
     return None
@@ -39,6 +42,7 @@ def _read_key_nonblocking(timeout: float = 0.1):
 
 class _StdinCbreak:
     """Temporarily switch stdin to cbreak mode so single keypresses are captured."""
+
     def __init__(self):
         self._old_settings = None
         self._enabled = sys.stdin.isatty()
@@ -164,12 +168,12 @@ def RobotWorkerLeRobot(
             except Exception as e:
                 debug_print(process_name, f"主臂拖动示教启用失败: {e}", "WARNING")
 
-        # 使用从臂配置的 MIT 或位置/速度关节控制模式
+        # 从臂固定使用 MIT 关节控制模式。
         try:
             slave_controller = robot.controllers["arm"]["left_arm"]
             slave_ctrl = slave_controller.controller
             slave_ctrl.MotionCtrl_1(0x00, 0x00, 0x00)
-            slave_ctrl.MotionCtrl_2(0x01, 0x01, 100, slave_controller._mit_mode_flag())
+            slave_ctrl.MotionCtrl_2(0x01, 0x01, 100, 0xAD)
             try:
                 slave_ctrl.EnableArm(7)
             except Exception:
@@ -267,6 +271,7 @@ def RobotWorkerLeRobot(
     except Exception as e:
         debug_print(process_name, f"发生未捕获异常: {e}", "ERROR")
         import traceback
+
         debug_print(process_name, traceback.format_exc(), "ERROR")
     finally:
         if control_loop is not None:
@@ -310,14 +315,17 @@ def _read_master_ctrl_action(master: PiperController):
         if getattr(ctrl, "Hz", 0) <= 0:
             return None
         joint_ctrl = ctrl.joint_ctrl
-        joint_cmd = np.array([
-            joint_ctrl.joint_1,
-            joint_ctrl.joint_2,
-            joint_ctrl.joint_3,
-            joint_ctrl.joint_4,
-            joint_ctrl.joint_5,
-            joint_ctrl.joint_6,
-        ], dtype=float)
+        joint_cmd = np.array(
+            [
+                joint_ctrl.joint_1,
+                joint_ctrl.joint_2,
+                joint_ctrl.joint_3,
+                joint_ctrl.joint_4,
+                joint_ctrl.joint_5,
+                joint_ctrl.joint_6,
+            ],
+            dtype=float,
+        )
         joint = joint_cmd / 57295.7795
 
         gripper_ctrl = master.controller.GetArmGripperCtrl()
@@ -334,14 +342,22 @@ def _read_master_feedback_action(master: PiperController):
         joint_msg = master.controller.GetArmJointMsgs()
         if getattr(joint_msg, "Hz", 0) <= 0:
             return None
-        joint = np.array([
-            joint_msg.joint_state.joint_1,
-            joint_msg.joint_state.joint_2,
-            joint_msg.joint_state.joint_3,
-            joint_msg.joint_state.joint_4,
-            joint_msg.joint_state.joint_5,
-            joint_msg.joint_state.joint_6,
-        ], dtype=float) * 0.001 / 180 * np.pi
+        joint = (
+            np.array(
+                [
+                    joint_msg.joint_state.joint_1,
+                    joint_msg.joint_state.joint_2,
+                    joint_msg.joint_state.joint_3,
+                    joint_msg.joint_state.joint_4,
+                    joint_msg.joint_state.joint_5,
+                    joint_msg.joint_state.joint_6,
+                ],
+                dtype=float,
+            )
+            * 0.001
+            / 180
+            * np.pi
+        )
 
         gripper_msg = master.controller.GetArmGripperMsgs()
         gripper = 0.0
@@ -459,9 +475,8 @@ def _teleop_transform(joint_in, gripper_in, teleop_kwargs):
     gripper = float(gripper_in)
 
     joint_sign = np.array(teleop_kwargs.get("joint_sign", [1, 1, 1, 1, 1, 1]), dtype=float)
-    joint_offset = (
-        np.array(teleop_kwargs.get("joint_offset", [0, 0, 0, 0, 0, 0]), dtype=float)
-        + np.array(teleop_kwargs.get("runtime_joint_offset", [0, 0, 0, 0, 0, 0]), dtype=float)
+    joint_offset = np.array(teleop_kwargs.get("joint_offset", [0, 0, 0, 0, 0, 0]), dtype=float) + np.array(
+        teleop_kwargs.get("runtime_joint_offset", [0, 0, 0, 0, 0, 0]), dtype=float
     )
     joint_scale = float(teleop_kwargs.get("joint_scale", 1.0))
     gripper_scale = float(teleop_kwargs.get("gripper_scale", 1.0))
@@ -480,15 +495,13 @@ def _teleop_transform(joint_in, gripper_in, teleop_kwargs):
 
 if __name__ == "__main__":
     import os
+
     os.environ["INFO_LEVEL"] = "INFO"  # DEBUG, INFO, ERROR
 
     # ==================== 配置参数 ====================
-    REPO_ID = "piperx/piperx_black_plug_demo_v3"
-    OUTPUT_DIR = os.environ.get(
-        "HF_LEROBOT_HOME",
-        os.path.expanduser("~/.cache/huggingface/lerobot"),
-    )
-    TASK_NAME = "put the white plug into the two-hole socket"
+    REPO_ID = "piperx/piperx_black_plug_demo"
+    OUTPUT_DIR = "/home/standard/agilex/lerobot"
+    TASK_NAME = "put the black plug into the two-hole socket"
     FPS = 10
     NUM_EPISODES = 100
 
@@ -498,7 +511,6 @@ if __name__ == "__main__":
     MOVE_CHECK = False
     ENABLE_SOFT_TELEOP = True
     ENABLE_DRAG_TEACH = True
-    USE_MIT_MODE = True
     USE_CTRL_FRAME = True
     FALLBACK_TO_FEEDBACK = False
 
@@ -541,7 +553,7 @@ if __name__ == "__main__":
     print(f"计划收集: {NUM_EPISODES} 个 episodes")
     print(f"主臂 CAN: {MASTER_CAN}")
     print(f"从臂 CAN: {SLAVE_CAN}")
-    print(f"从臂关节控制模式: {'MIT (0xAD)' if USE_MIT_MODE else '位置/速度 (0x00)'}")
+    print("从臂关节控制模式: MIT (0xAD)")
     print(f"从臂初始化关节(rad): {RESET_JOINT_POSITION}")
     print("=" * 60)
     print("提示: 这是软件主从模式（无需硬件主从配置）")
@@ -565,7 +577,7 @@ if __name__ == "__main__":
         "move_check": MOVE_CHECK,
         "arm_can": SLAVE_CAN,
         "reset_joint_position": RESET_JOINT_POSITION,
-        "use_mit_mode": USE_MIT_MODE,
+        "use_mit_mode": True,
     }
     teleop_kwargs = {
         "enabled": ENABLE_SOFT_TELEOP,
@@ -614,9 +626,9 @@ if __name__ == "__main__":
         collected_episodes = 0  # 成功收集的 episode 数量
 
         while collected_episodes < NUM_EPISODES:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"Episode {collected_episodes + 1}/{NUM_EPISODES}")
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
 
             # 重置状态
             start_event.clear()
@@ -636,12 +648,12 @@ if __name__ == "__main__":
             with _StdinCbreak():
                 while True:
                     key = _read_key_nonblocking(timeout=0.1)
-                    if key == ' ':
+                    if key == " ":
                         print("\n⚠ 检测到空格键 - 放弃当前 episode")
                         discard_event.set()
                         finish_event.set()
                         break
-                    if key in ('\n', '\r'):
+                    if key in ("\n", "\r"):
                         print("\n✓ 检测到 Enter 键 - 保存当前 episode")
                         finish_event.set()
                         break
