@@ -201,6 +201,7 @@ pexpect==4.9.0
 pfzy==0.3.4
 pillow==11.2.1
 pip==24.0
+piper-sdk==0.6.1
 platformdirs==4.3.8
 pluggy==1.6.0
 polars==1.30.0
@@ -225,6 +226,7 @@ pynput==1.8.1
 pynvml==12.0.0
 pyopengl==3.1.9
 pyparsing==3.2.3
+pyrealsense2==2.56.5.9235
 pysocks==1.7.1
 pytest==8.3.5
 python-dateutil==2.9.0.post0

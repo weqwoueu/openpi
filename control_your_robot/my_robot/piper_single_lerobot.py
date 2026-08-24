@@ -14,12 +14,12 @@ from robot.sensor.Realsense_sensor import RealsenseSensor
 
 # 默认起始位置（弧度）
 DEFAULT_RESET_JOINT_POSITION_LEFT_ARM = [
-    0,   # Joint 1
-    -0.4208,    # Joint 2
-    0.0324,  # Joint 3
-    0.0780,   # Joint 4
-    0.3558,  # Joint 5
-    0.0078,    # Joint 6
+    0,    # Joint 1
+    1.0,  # Joint 2
+    -1.0,  # Joint 3
+    1.0,  # Joint 4
+    0,    # Joint 5
+    0,    # Joint 6
 ]
 
 
@@ -33,7 +33,7 @@ class PiperSingleLeRobot(RobotLeRobot):
         task_name: str = "complete the task",
         fps: int = 10,
         move_check: bool = True,
-        arm_can: str = "can0",
+        arm_can: str = "can_left_slave",
         reset_joint_position: list[float] | None = None,
     ):
         # 相机映射：从 sensor 名称到 LeRobot 字段名

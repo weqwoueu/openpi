@@ -36,20 +36,20 @@ GRIPPER_CLOSE_THRESHOLD = 0.5
 GRIPPER_CLOSE_OFFSET = 0.1
 GRIPPER_INTERVENTION_DEADBAND = 0.15  # 15% - must overcome to release gripper hold on intervention entry
 FIXED_MASTER_RESET_JOINT = [
-    0.05902703429555556,
-    -0.03265510974777778,
-    0.01178097225,
-    0.04764748776666667,
-    -0.21891664434333333,
-    0.030892327233333332,
+    0,
+    1.0,
+    -1.0,
+    1.0,
+    0,
+    0,
 ]
 FIXED_FOLLOWER_RESET_JOINT = [
-    0.0,
-    -0.4208,
-    0.0324,
-    0.0780,
-    0.3558,
-    0.0078,
+    0,
+    1.0,
+    -1.0,
+    1.0,
+    0,
+    0,
 ]
 
 
@@ -377,7 +377,12 @@ if __name__ == "__main__":
     parser.add_argument("--model-path", type=str, default="/app/checkpoint/white_426_100_r1_r3_r3new/24000", help="checkpoint 根目录")
 
     #plug
-    parser.add_argument("--task-name", type=str, default="put the white plug into the two-hole socket", help="任务名称")
+    parser.add_argument(
+        "--task-name",
+        type=str,
+        default="Pick up the black plug and insert it into the white two-hole socket.",
+        help="任务名称",
+    )
     parser.add_argument("--train-config", type=str, default="pi05_star_white_plug_infer", help="训练配置名")
 
 

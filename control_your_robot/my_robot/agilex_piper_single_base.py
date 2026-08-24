@@ -11,14 +11,14 @@ from robot.sensor.Realsense_sensor import RealsenseSensor
 
 from robot.data.collect_any import CollectAny
 
-# Define start position (in degrees)
+# Define task start position (in radians)
 START_POSITION_ANGLE_LEFT_ARM = [
-    0,   # Joint 1
-    -0.4208,    # Joint 2
-    0.0324,  # Joint 3
-    0.0780,   # Joint 4
-    0.3558,  # Joint 5
-    0.0078,    # Joint 6
+    0,    # Joint 1
+    1.0,  # Joint 2
+    -1.0,  # Joint 3
+    1.0,  # Joint 4
+    0,    # Joint 5
+    0,    # Joint 6
 ]
 
 # Define start position (in degrees)
@@ -65,7 +65,7 @@ class PiperSingle(Robot):
     def set_up(self):
         super().set_up()
 
-        self.controllers["arm"]["left_arm"].set_up("can1")
+        self.controllers["arm"]["left_arm"].set_up("can_left_slave")
         self.sensors["image"]["cam_head"].set_up(self.camera_serials["head"])
         self.sensors["image"]["cam_wrist"].set_up(self.camera_serials["wrist"])
 

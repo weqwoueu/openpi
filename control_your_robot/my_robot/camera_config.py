@@ -2,30 +2,16 @@
 
 from __future__ import annotations
 
-#toy
-# PIPER_SINGLE_CAMERA_SERIALS = {
-#     "head": "338622070768",
-#     "wrist": "338622072453",
-# }
-
-# PIPER_DAGGER_CAMERA_SERIALS = {
-#     "head": "338622070768",
-#     "wrist": "338622072453",
-# }
-
-
-
-#plug
+# PiperX plug task: D435I head camera and D405 wrist camera.
 PIPER_SINGLE_CAMERA_SERIALS = {
-    "wrist": "338622072453",
-    "head": "112322077378",
+    "head": "337122071685",
+    "wrist": "230322274885",
 }
 
 PIPER_DAGGER_CAMERA_SERIALS = {
-    "wrist": "338622072453",
-    "head": "112322077378",
+    "head": "337122071685",
+    "wrist": "230322274885",
 }
-
 
 
 def get_piper_camera_serials(profile: str = "single") -> dict[str, str]:
@@ -37,5 +23,3 @@ def get_piper_camera_serials(profile: str = "single") -> dict[str, str]:
     if profile not in serials_by_profile:
         raise ValueError(f"Unknown Piper camera profile: {profile}")
     return dict(serials_by_profile[profile])
-
-

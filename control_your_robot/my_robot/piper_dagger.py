@@ -12,21 +12,21 @@ from robot.sensor.Realsense_sensor import RealsenseSensor
 # Start positions are in radians.
 START_POSITION_ANGLE_FOLLOWER_ARM = [
     0,
-    -0.4208,
-    0.0324,
-    0.0780,
-    0.3558,
-    0.0078,
+    1.0,
+    -1.0,
+    1.0,
+    0,
+    0,
 ]
 
-# Master reset pose captured from the current can0 arm state.
+# Master and follower use the same task reset pose.
 START_POSITION_ANGLE_MASTER_ARM = [
-    0.069639,
-    -0.035343,
-    0.038153,
-    -0.064368,
-    0.069691,
-    -0.010228,
+    0,
+    1.0,
+    -1.0,
+    1.0,
+    0,
+    0,
 ]
 
 # Master-slave linkage config (0x470).
@@ -205,8 +205,8 @@ class PiperDAgger(Robot):
         import time
 
         # Master arm on can0 (human operates), follower arm on can1 (executes task)
-        self.controllers["arm"]["right_arm"].set_up("can0")   # master -> can0 (human drags)
-        self.controllers["arm"]["left_arm"].set_up("can1")    # follower -> can1 (executes)
+        self.controllers["arm"]["right_arm"].set_up("can_left_mas")   # master -> can0 (human drags)
+        self.controllers["arm"]["left_arm"].set_up("can_left_slave")    # follower -> can1 (executes)
 
         # 等待 CAN 总线稳定（刚上电时需要更长时间）
         print("[setup] Waiting for CAN bus to stabilize...")

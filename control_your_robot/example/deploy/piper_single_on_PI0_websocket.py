@@ -127,8 +127,12 @@ def main():
     parser = argparse.ArgumentParser(description="PI0 单臂 websocket 远程部署脚本（默认 pi05，传 adv_ind 时兼容 PiStar）")
     parser.add_argument("--server-host", type=str, default="127.0.0.1", help="远端 websocket 推理服务器地址")
     parser.add_argument("--server-port", type=int, default=8000, help="远端 websocket 推理服务器端口")
-    #parser.add_argument("--task-name", type=str, default="Put these toys into the box", help="任务名称")
-    parser.add_argument("--task-name", type=str, default="put the white plug into the two-hole socket", help="任务名称")
+    parser.add_argument(
+        "--task-name",
+        type=str,
+        default="Pick up the black plug and insert it into the white two-hole socket.",
+        help="任务名称",
+    )
     parser.add_argument("--instruction", type=str, default=None, help="显式指定 prompt；不传则从任务文件中随机采样")
     parser.add_argument("--adv-ind", type=str, default=None, help="可选。传入时会把请求按 PiStar 方式附带 adv_ind，例如 positive/negative")
     parser.add_argument("--chunk-size", type=int, default=10, help="每次仅执行动作块前多少步")

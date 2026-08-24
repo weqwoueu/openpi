@@ -110,7 +110,7 @@ def RobotWorkerLeRobot(
     last_send_time = 0.0
 
     if teleop_enabled:
-        master_can = teleop_kwargs.get("master_can", "can0")
+        master_can = teleop_kwargs.get("master_can", "can_left_mas")
         master = PiperController("master_arm")
         master.set_up(master_can)
         master.set_collect_info(["joint", "gripper"])
@@ -522,16 +522,15 @@ if __name__ == "__main__":
     os.environ["INFO_LEVEL"] = "INFO"  # DEBUG, INFO, ERROR
 
     # ==================== 配置参数 ====================
-    REPO_ID = "white_plug"
-    OUTPUT_DIR = "/app/datasets/white_plug_416"
-    #TASK_NAME = "Put these toys into the box"
+    REPO_ID = "piperx/piperx_black_plug_demo_v1"
+    OUTPUT_DIR = "/home/standard/workspace/test/pistar/.cache/huggingface/lerobot"
     TASK_NAME = "put the white plug into the two-hole socket"
     FPS = 10
     NUM_EPISODES = 100
 
-    # 主从设置 (主臂 can0, 从臂 can1) - 两根 CAN 线分别连接
-    MASTER_CAN = "can0"
-    SLAVE_CAN = "can1"
+    # 主从设置：两根 CAN 线分别连接
+    MASTER_CAN = "can_left_mas"
+    SLAVE_CAN = "can_left_slave"
     MOVE_CHECK = True
     ENABLE_SOFT_TELEOP = True
     ENABLE_DRAG_TEACH = True
@@ -554,12 +553,12 @@ if __name__ == "__main__":
     ALIGN_TO_FOLLOWER_ON_INIT = True
     ALIGNMENT_TIMEOUT = 2.0
     RESET_JOINT_POSITION = [
-        0.063582,
-        0.000297,
-        -0.017506,
-        0.030683,
-        0.608335,
-        0.114284,
+        0,
+        1.0,
+        -1.0,
+        1.0,
+        0,
+        0,
     ]
     # ================================================
 
@@ -571,6 +570,7 @@ if __name__ == "__main__":
     print(f"任务名称: {TASK_NAME}")
     print(f"采集频率: {FPS} Hz")
     print(f"计划收集: {NUM_EPISODES} 个 episodes")
+    print(f"主臂 CAN: {MASTER_CAN}")
     print(f"从臂 CAN: {SLAVE_CAN}")
     print(f"从臂初始化关节(rad): {RESET_JOINT_POSITION}")
     print("=" * 60)
