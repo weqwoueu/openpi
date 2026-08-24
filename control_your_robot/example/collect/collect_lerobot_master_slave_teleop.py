@@ -26,6 +26,7 @@ from robot.controller.Piper_controller import PiperController
 from robot.data.collect_lerobot_rl import CollectLeRobotRL
 from robot.utils.worker.time_scheduler import TimeScheduler
 from robot.utils.base.data_handler import debug_print
+from robot.utils.teleop_filter import EmaSlewFilter, FixedRateControlLoop
 
 
 def _read_key_nonblocking(timeout: float = 0.1):
@@ -106,8 +107,15 @@ def RobotWorkerLeRobot(
     # ===== 软件主从遥操作: 初始化主臂控制器 =====
     teleop_enabled = teleop_kwargs.get("enabled", True)
     master = None
-    last_cmd = {"joint": None, "gripper": None}
-    last_send_time = 0.0
+    control_loop = None
+    control_fps = float(teleop_kwargs.get("control_fps", 30))
+    action_filter = EmaSlewFilter(
+        ema_enabled=teleop_kwargs.get("teacher_action_ema_enabled", True),
+        ema_alpha=teleop_kwargs.get("teacher_action_ema_alpha", 0.8),
+        slew_enabled=teleop_kwargs.get("teacher_action_slew_enabled", True),
+        max_joint_step=teleop_kwargs.get("teacher_action_max_joint_step", 0.04),
+        max_gripper_step=teleop_kwargs.get("teacher_action_max_gripper_step", 0.025 / 0.07),
+    )
 
     if teleop_enabled:
         master_can = teleop_kwargs.get("master_can", "can_left_mas")
@@ -172,10 +180,27 @@ def RobotWorkerLeRobot(
         aligned_state = _align_master_to_follower_pose(robot, master, teleop_kwargs, process_name)
         if aligned_state is not None:
             teleop_kwargs["alignment_ready"] = True
-            last_cmd = {
-                "joint": np.array(aligned_state["joint"], dtype=float),
-                "gripper": float(aligned_state["gripper"]),
-            }
+            action_filter.seed(aligned_state["joint"], aligned_state["gripper"])
+
+        def teleop_control_step():
+            try:
+                if not teleop_kwargs.get("alignment_ready", True):
+                    retry_state = _align_master_to_follower_pose(
+                        robot, master, teleop_kwargs, process_name, timeout=0.1, log_failure=False
+                    )
+                    if retry_state is None:
+                        return
+                    teleop_kwargs["alignment_ready"] = True
+                    action_filter.seed(retry_state["joint"], retry_state["gripper"])
+
+                move_data = _read_master_action(master, teleop_kwargs)
+                if move_data is not None:
+                    robot.move({"arm": {"left_arm": action_filter.process(move_data)}})
+            except Exception as e:
+                debug_print(process_name, f"镜像控制错误: {e}", "DEBUG")
+
+        control_loop = FixedRateControlLoop(control_fps=control_fps, step=teleop_control_step)
+        control_loop.start()
 
     debug_print(process_name, "初始化完成，等待主进程指令...", "INFO")
 
@@ -183,31 +208,7 @@ def RobotWorkerLeRobot(
         while not exit_event.is_set():
             # 1. 等待开始信号（同时让从臂跟随主臂）
             if not start_event.is_set():
-                # 在等待期间也让从臂跟随主臂移动
-                if teleop_enabled and master is not None:
-                    try:
-                        if not teleop_kwargs.get("alignment_ready", True):
-                            aligned_state = _align_master_to_follower_pose(
-                                robot, master, teleop_kwargs, process_name, timeout=0.1, log_failure=False
-                            )
-                            if aligned_state is None:
-                                time.sleep(0.01)
-                                continue
-                            teleop_kwargs["alignment_ready"] = True
-                            last_cmd = {
-                                "joint": np.array(aligned_state["joint"], dtype=float),
-                                "gripper": float(aligned_state["gripper"]),
-                            }
-
-                        move_data = _read_master_action(master, teleop_kwargs)
-                        move_data, last_cmd, last_send_time = _filter_and_limit_action(
-                            move_data, last_cmd, last_send_time, teleop_kwargs
-                        )
-                        if move_data is not None:
-                            robot.move({"arm": {"left_arm": move_data}})
-                    except Exception as e:
-                        debug_print(process_name, f"镜像控制错误: {e}", "DEBUG")
-                time.sleep(0.01)  # 100Hz 镜像频率
+                time.sleep(0.01)
                 continue
 
             # 收到开始信号，进入采集循环
@@ -227,30 +228,7 @@ def RobotWorkerLeRobot(
                     break
 
                 try:
-                    # 读取主臂状态并驱动从臂
-                    if teleop_enabled and master is not None:
-                        if not teleop_kwargs.get("alignment_ready", True):
-                            aligned_state = _align_master_to_follower_pose(
-                                robot, master, teleop_kwargs, process_name, timeout=0.1, log_failure=False
-                            )
-                            if aligned_state is None:
-                                data = robot.get()
-                                robot.collection.collect(data[0], data[1], is_intervention=True)
-                                continue
-                            teleop_kwargs["alignment_ready"] = True
-                            last_cmd = {
-                                "joint": np.array(aligned_state["joint"], dtype=float),
-                                "gripper": float(aligned_state["gripper"]),
-                            }
-
-                        move_data = _read_master_action(master, teleop_kwargs)
-                        move_data, last_cmd, last_send_time = _filter_and_limit_action(
-                            move_data, last_cmd, last_send_time, teleop_kwargs
-                        )
-                        if move_data is not None:
-                            robot.move({"arm": {"left_arm": move_data}})
-
-                    # 获取从臂/相机数据并收集
+                    # 相机/数据采集保持 10 Hz，不阻塞独立的 30 Hz PiperX 控制线程。
                     data = robot.get()
                     robot.collection.collect(data[0], data[1], is_intervention=True)
                 except Exception as e:
@@ -280,6 +258,9 @@ def RobotWorkerLeRobot(
         import traceback
         debug_print(process_name, traceback.format_exc(), "ERROR")
     finally:
+        if control_loop is not None:
+            control_loop.stop()
+
         # 清理：将主臂恢复到 FOLLOWER 模式
         if teleop_enabled and master is not None:
             try:
@@ -457,41 +438,6 @@ def _align_master_to_follower_pose(
     }
 
 
-def _filter_and_limit_action(move_data, last_cmd, last_send_time, teleop_kwargs):
-    """对动作做死区与限频，避免主臂抖动导致从臂乱动"""
-    if move_data is None:
-        return None, last_cmd, last_send_time
-
-    joint = np.array(move_data["joint"], dtype=float)
-    gripper = float(move_data["gripper"])
-
-    # 发送最小间隔
-    min_interval = float(teleop_kwargs.get("min_send_interval", 0.02))
-    now = time.time()
-    if min_interval > 0 and now - last_send_time < min_interval:
-        return None, last_cmd, last_send_time
-
-    # 死区过滤
-    joint_deadband = float(teleop_kwargs.get("joint_deadband", 0.005))
-    gripper_deadband = float(teleop_kwargs.get("gripper_deadband", 0.01))
-    if last_cmd["joint"] is not None:
-        joint_delta = np.max(np.abs(joint - last_cmd["joint"]))
-        gripper_delta = abs(gripper - last_cmd["gripper"])
-        if joint_delta < joint_deadband and gripper_delta < gripper_deadband:
-            return None, last_cmd, last_send_time
-
-    # 可选低通滤波（减少高频抖动）
-    alpha = teleop_kwargs.get("filter_alpha", None)
-    if alpha is not None and last_cmd["joint"] is not None:
-        alpha = float(alpha)
-        joint = alpha * joint + (1.0 - alpha) * last_cmd["joint"]
-        gripper = alpha * gripper + (1.0 - alpha) * last_cmd["gripper"]
-
-    last_cmd = {"joint": joint, "gripper": gripper}
-    move_data = {"joint": joint.tolist(), "gripper": gripper}
-    return move_data, last_cmd, now
-
-
 def _teleop_transform(joint_in, gripper_in, teleop_kwargs):
     # 基础映射（可在配置中做缩放/反向/偏置）
     joint = np.array(joint_in, dtype=float)
@@ -538,11 +484,14 @@ if __name__ == "__main__":
     USE_CTRL_FRAME = True
     FALLBACK_TO_FEEDBACK = False
 
-    # 抑制抖动
-    JOINT_DEADBAND = 0.005  # rad
-    GRIPPER_DEADBAND = 0.01
-    MIN_SEND_INTERVAL = 0.02  # s
-    FILTER_ALPHA = None  # 0~1, None 表示不滤波
+    # 与 robocoin scripts/piperx/run_dagger.sh 一致的遥操控制链
+    CONTROL_FPS = 30
+    TEACHER_ACTION_EMA_ENABLED = True
+    TEACHER_ACTION_EMA_ALPHA = 0.80
+    TEACHER_ACTION_SLEW_ENABLED = True
+    TEACHER_ACTION_MAX_JOINT_STEP = 0.040  # rad / control tick
+    PIPERX_GRIPPER_RANGE_M = 0.07  # 与 PiperController 的 0..1 -> 0..70mm 映射一致
+    TEACHER_ACTION_MAX_GRIPPER_STEP = 0.025 / PIPERX_GRIPPER_RANGE_M
 
     # 关节映射/缩放（如有方向相反可设为 -1）
     JOINT_SIGN = [1, 1, 1, 1, 1, 1]
@@ -570,6 +519,7 @@ if __name__ == "__main__":
     print(f"输出目录: {OUTPUT_DIR}")
     print(f"任务名称: {TASK_NAME}")
     print(f"采集频率: {FPS} Hz")
+    print(f"遥操控制频率: {CONTROL_FPS} Hz")
     print(f"计划收集: {NUM_EPISODES} 个 episodes")
     print(f"主臂 CAN: {MASTER_CAN}")
     print(f"从臂 CAN: {SLAVE_CAN}")
@@ -606,10 +556,12 @@ if __name__ == "__main__":
         "teaching_friction": TEACHING_FRICTION,
         "use_ctrl_frame": USE_CTRL_FRAME,
         "fallback_to_feedback": FALLBACK_TO_FEEDBACK,
-        "joint_deadband": JOINT_DEADBAND,
-        "gripper_deadband": GRIPPER_DEADBAND,
-        "min_send_interval": MIN_SEND_INTERVAL,
-        "filter_alpha": FILTER_ALPHA,
+        "control_fps": CONTROL_FPS,
+        "teacher_action_ema_enabled": TEACHER_ACTION_EMA_ENABLED,
+        "teacher_action_ema_alpha": TEACHER_ACTION_EMA_ALPHA,
+        "teacher_action_slew_enabled": TEACHER_ACTION_SLEW_ENABLED,
+        "teacher_action_max_joint_step": TEACHER_ACTION_MAX_JOINT_STEP,
+        "teacher_action_max_gripper_step": TEACHER_ACTION_MAX_GRIPPER_STEP,
         "joint_sign": JOINT_SIGN,
         "joint_offset": JOINT_OFFSET,
         "joint_scale": JOINT_SCALE,
@@ -702,7 +654,7 @@ if __name__ == "__main__":
                 print("继续采集下一个 episode...")
             else:
                 print(f"✓ Episode {collected_episodes + 1} 完成！")
-                print(f"  平均时间间隔: {time_scheduler.real_time_average_time_interval:.4f}s")
+                print(f"  平均采集时间间隔: {time_scheduler.real_time_average_time_interval:.4f}s")
                 collected_episodes += 1  # 只有保存成功才增加计数
 
             # 手动重置一下 start_event，让子进程进入下一个循环等待
