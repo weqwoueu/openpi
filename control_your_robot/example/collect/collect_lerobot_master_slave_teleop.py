@@ -156,12 +156,12 @@ def RobotWorkerLeRobot(
             except Exception as e:
                 debug_print(process_name, f"主臂拖动示教启用失败: {e}", "WARNING")
 
-        # 确保从臂处于正常控制模式（软件控制）
+        # 使用从臂配置的 MIT 或位置/速度关节控制模式
         try:
-            slave_ctrl = robot.controllers["arm"]["left_arm"].controller
-            # 设置从臂为正常关节控制模式
+            slave_controller = robot.controllers["arm"]["left_arm"]
+            slave_ctrl = slave_controller.controller
             slave_ctrl.MotionCtrl_1(0x00, 0x00, 0x00)
-            slave_ctrl.MotionCtrl_2(0x01, 0x01, 100, 0x00)
+            slave_ctrl.MotionCtrl_2(0x01, 0x01, 100, slave_controller._mit_mode_flag())
             try:
                 slave_ctrl.EnableArm(7)
             except Exception:
@@ -534,6 +534,7 @@ if __name__ == "__main__":
     MOVE_CHECK = True
     ENABLE_SOFT_TELEOP = True
     ENABLE_DRAG_TEACH = True
+    USE_MIT_MODE = True
     USE_CTRL_FRAME = True
     FALLBACK_TO_FEEDBACK = False
 
@@ -572,6 +573,7 @@ if __name__ == "__main__":
     print(f"计划收集: {NUM_EPISODES} 个 episodes")
     print(f"主臂 CAN: {MASTER_CAN}")
     print(f"从臂 CAN: {SLAVE_CAN}")
+    print(f"从臂关节控制模式: {'MIT (0xAD)' if USE_MIT_MODE else '位置/速度 (0x00)'}")
     print(f"从臂初始化关节(rad): {RESET_JOINT_POSITION}")
     print("=" * 60)
     print("提示: 这是软件主从模式（无需硬件主从配置）")
@@ -595,6 +597,7 @@ if __name__ == "__main__":
         "move_check": MOVE_CHECK,
         "arm_can": SLAVE_CAN,
         "reset_joint_position": RESET_JOINT_POSITION,
+        "use_mit_mode": USE_MIT_MODE,
     }
     teleop_kwargs = {
         "enabled": ENABLE_SOFT_TELEOP,

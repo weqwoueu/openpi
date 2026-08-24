@@ -13,12 +13,16 @@ https://github.com/agilexrobotics/piper_sdk.git
 '''
 
 class PiperController(ArmController):
-    def __init__(self, name):
+    def __init__(self, name, use_mit_mode=False):
         super().__init__()
         self.name = name
         self.controller_type = "user_controller"
         self.controller = None
         self.gripper_effort = 1000
+        self.use_mit_mode = bool(use_mit_mode)
+
+    def _mit_mode_flag(self):
+        return 0xAD if self.use_mit_mode else 0x00
     
     def set_up(self, can:str):
         piper = C_PiperInterface_V2(can)
@@ -59,7 +63,7 @@ class PiperController(ArmController):
         j1, j2, j3 ,j4, j5, j6 = joint * 57295.7795 #1000*180/3.1415926
         j1, j2, j3 ,j4, j5, j6 = int(j1), int(j2), int(j3), int(j4), int(j5), int(j6)
         
-        self.controller.MotionCtrl_2(0x01, 0x01, int(speed_percent), 0x00)
+        self.controller.MotionCtrl_2(0x01, 0x01, int(speed_percent), self._mit_mode_flag())
         self.controller.JointCtrl(j1, j2, j3, j4, j5, j6)
 
     def set_gripper_effort(self, effort):

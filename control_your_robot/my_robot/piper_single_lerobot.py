@@ -35,6 +35,7 @@ class PiperSingleLeRobot(RobotLeRobot):
         move_check: bool = True,
         arm_can: str = "can_left_slave",
         reset_joint_position: list[float] | None = None,
+        use_mit_mode: bool = False,
     ):
         # 相机映射：从 sensor 名称到 LeRobot 字段名
         camera_keys = {
@@ -58,6 +59,7 @@ class PiperSingleLeRobot(RobotLeRobot):
 
         self.name = "piper_single_lerobot"
         self.arm_can = arm_can
+        self.use_mit_mode = bool(use_mit_mode)
         self.camera_serials = get_piper_camera_serials("single")
         self.reset_joint_position = np.array(
             reset_joint_position if reset_joint_position is not None else DEFAULT_RESET_JOINT_POSITION_LEFT_ARM,
@@ -67,7 +69,7 @@ class PiperSingleLeRobot(RobotLeRobot):
         # 初始化控制器和传感器
         self.controllers = {
             "arm": {
-                "left_arm": PiperController("left_arm"),
+                "left_arm": PiperController("left_arm", use_mit_mode=self.use_mit_mode),
             },
         }
         self.sensors = {
