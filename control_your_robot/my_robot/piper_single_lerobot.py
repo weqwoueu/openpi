@@ -1,6 +1,4 @@
-"""
-Piper 单臂机器人 - 直接生成 LeRobot 格式
-"""
+"""PiperX 单臂机器人，直接生成标准 LeRobot 格式。"""
 import sys
 sys.path.append("./")
 
@@ -24,7 +22,7 @@ DEFAULT_RESET_JOINT_POSITION_LEFT_ARM = [
 
 
 class PiperSingleLeRobot(RobotLeRobot):
-    """Piper 单臂机器人 - 直接生成 LeRobot Libero 格式"""
+    """PiperX 单臂机器人。"""
 
     def __init__(
         self,
@@ -39,8 +37,8 @@ class PiperSingleLeRobot(RobotLeRobot):
     ):
         # 相机映射：从 sensor 名称到 LeRobot 字段名
         camera_keys = {
-            "cam_head": "image",          # Libero 格式使用 "image"
-            "cam_wrist": "wrist_image",   # Libero 格式使用 "wrist_image"
+            "cam_head": "observation.images.cam_head",
+            "cam_wrist": "observation.images.cam_wrist",
         }
 
         super().__init__(
@@ -48,7 +46,7 @@ class PiperSingleLeRobot(RobotLeRobot):
             output_dir=output_dir,
             task_name=task_name,
             fps=fps,
-            robot_type="piper",
+            robot_type="piperx",
             state_dim=7,  # 单臂：6关节 + 1夹爪
             action_dim=7,
             image_size=(720,1280),  # 更新为 1280x720 分辨率
@@ -101,7 +99,7 @@ class PiperSingleLeRobot(RobotLeRobot):
         })
 
         print(f"✓ {self.name} 初始化成功！")
-        print(f"  - 数据将直接保存为 LeRobot Libero 格式")
+        print(f"  - 数据将保存为标准 LeRobot PiperX 格式")
         print(f"  - 输出路径: {self.collection.get_dataset_path()}")
 
 

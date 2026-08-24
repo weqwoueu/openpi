@@ -1,3 +1,4 @@
+import copy
 import threading
 import time
 
@@ -14,6 +15,8 @@ class FixedRateControlLoop:
         self.step = step
         self._stop_event = threading.Event()
         self._thread = None
+        self._latest_lock = threading.Lock()
+        self._latest = None
 
     def start(self):
         if self._thread is not None and self._thread.is_alive():
@@ -36,10 +39,17 @@ class FixedRateControlLoop:
         period = 1.0 / self.control_fps
         while not self._stop_event.is_set():
             started_at = time.monotonic()
-            self.step()
+            result = self.step()
+            if result is not None:
+                with self._latest_lock:
+                    self._latest = copy.deepcopy(result)
             remaining = period - (time.monotonic() - started_at)
             if remaining > 0:
                 self._stop_event.wait(remaining)
+
+    def get_latest(self):
+        with self._latest_lock:
+            return copy.deepcopy(self._latest)
 
 
 class EmaSlewFilter:

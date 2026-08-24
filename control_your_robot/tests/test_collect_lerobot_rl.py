@@ -15,10 +15,12 @@ sys.path.append(str(PROJECT_ROOT / "src"))
 
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from robot.data.collect_lerobot_rl import (
+    ACTION_KEY,
     ADV_IND_KEY,
     INTERVENTION_KEY,
     REWARD_KEY,
     REWARD_LABEL_KEY,
+    STATE_KEY,
     VALUE_LABEL_KEY,
     CollectLeRobotRL,
 )
@@ -62,11 +64,19 @@ def generate_mock_data(step):
     return controllers_data, sensors_data
 
 
+def generate_mock_action(step):
+    """生成与下一帧 feedback 明显不同的 pilot 命令。"""
+    return {
+        "joint": np.linspace(-0.6, -0.1, 6, dtype=np.float32) - step * 0.02,
+        "gripper": np.float32(0.2 + step * 0.03),
+    }
+
+
 def build_feature_schema(value_label_key=VALUE_LABEL_KEY, include_new_fields=True):
     """构造测试用 schema。"""
     features = {
-        "state": {},
-        "actions": {},
+        STATE_KEY: {},
+        ACTION_KEY: {},
         INTERVENTION_KEY: {},
         value_label_key: {},
     }
@@ -86,6 +96,7 @@ def create_collector(
     move_check=False,
     penalty_value=-1.0,
     output_dir=None,
+    camera_keys=None,
 ):
     """创建测试收集器，可注入 fake dataset。"""
     collector = CollectLeRobotRL(
@@ -93,11 +104,11 @@ def create_collector(
         output_dir=str(output_dir or Path("./test_output")),
         task_name="test_task",
         fps=10,
-        robot_type="piper",
+        robot_type="piperx",
         state_dim=7,
         action_dim=7,
         image_size=(480, 640),
-        camera_keys={},
+        camera_keys=camera_keys or {},
         move_check=move_check,
         tolerance=0.0001,
         penalty_value=penalty_value,
@@ -116,7 +127,12 @@ def collect_episode(collector, num_frames, intervention_pattern=None):
         is_intervention = False
         if intervention_pattern is not None:
             is_intervention = intervention_pattern[step]
-        collector.collect(controllers_data, sensors_data, is_intervention=is_intervention)
+        collector.collect(
+            controllers_data,
+            sensors_data,
+            action_data=generate_mock_action(step),
+            is_intervention=is_intervention,
+        )
 
 
 def tensor_scalar(value):
@@ -154,17 +170,30 @@ def test_dataset_schema_creation():
     LeRobotDataset.create = fake_create
     try:
         with TemporaryDirectory() as tmpdir:
-            collector = create_collector(output_dir=tmpdir)
+            camera_keys = {
+                "cam_head": "observation.images.cam_head",
+                "cam_wrist": "observation.images.cam_wrist",
+            }
+            collector = create_collector(output_dir=tmpdir, camera_keys=camera_keys)
             controllers_data, sensors_data = generate_mock_data(0)
-            collector.collect(controllers_data, sensors_data, is_intervention=False)
+            collector.collect(
+                controllers_data,
+                sensors_data,
+                action_data=generate_mock_action(0),
+                is_intervention=False,
+            )
 
         features = captured["features"]
+        assert STATE_KEY in features, f"缺少 {STATE_KEY} schema"
+        assert ACTION_KEY in features, f"缺少 {ACTION_KEY} schema"
+        for camera_key in camera_keys.values():
+            assert features[camera_key]["dtype"] == "video"
         assert REWARD_KEY in features, "缺少 reward schema"
         assert REWARD_LABEL_KEY in features, "缺少 reward_label schema"
         assert ADV_IND_KEY in features, "缺少 adv_ind schema"
         assert features[ADV_IND_KEY]["dtype"] == "string", "adv_ind dtype 应为 string"
         print("✓ 新 schema 包含 reward / reward_label / adv_ind")
-        return True
+        return
     finally:
         LeRobotDataset.create = original_create
 
@@ -180,16 +209,49 @@ def test_existing_schema_validation():
 
     controllers_data, sensors_data = generate_mock_data(0)
     try:
-        collector.collect(controllers_data, sensors_data, is_intervention=False)
+        collector.collect(
+            controllers_data,
+            sensors_data,
+            action_data=generate_mock_action(0),
+            is_intervention=False,
+        )
     except RuntimeError as exc:
         message = str(exc)
         assert REWARD_KEY in message, "错误信息应包含 reward"
         assert REWARD_LABEL_KEY in message, "错误信息应包含 reward_label"
         assert ADV_IND_KEY in message, "错误信息应包含 adv_ind"
         print("✓ 旧 schema 在 collect 阶段被正确拦截")
-        return True
+        return
 
     raise AssertionError("旧 schema 未被拦截")
+
+
+def test_legacy_state_actions_schema_is_rejected():
+    features = {
+        "state": {},
+        "actions": {},
+        INTERVENTION_KEY: {},
+        VALUE_LABEL_KEY: {},
+        REWARD_KEY: {},
+        REWARD_LABEL_KEY: {},
+        ADV_IND_KEY: {},
+    }
+    collector = create_collector(dataset=FakeDataset(features=features))
+    controllers_data, sensors_data = generate_mock_data(0)
+
+    try:
+        collector.collect(
+            controllers_data,
+            sensors_data,
+            action_data=generate_mock_action(0),
+            is_intervention=True,
+        )
+    except RuntimeError as exc:
+        assert STATE_KEY in str(exc)
+        assert ACTION_KEY in str(exc)
+        return
+
+    raise AssertionError("旧 state/actions schema 未被拦截")
 
 
 def test_teleop_success_labels():
@@ -215,7 +277,36 @@ def test_teleop_success_labels():
     assert adv_ind == ["positive"] * 5, f"teleop adv_ind 错误: {adv_ind}"
     assert interventions == [1.0] * 5, f"teleop intervention 错误: {interventions}"
     print("✓ teleop 成功标签正确")
-    return True
+    return
+
+
+def test_explicit_pilot_action_is_saved_instead_of_next_state():
+    dataset = FakeDataset(features=build_feature_schema())
+    collector = create_collector(dataset=dataset)
+
+    collect_episode(collector, num_frames=3, intervention_pattern=[True] * 3)
+    collector.save_episode(success=True, adv_ind_value="positive")
+
+    saved_actions = np.stack(
+        [np.asarray(frame[ACTION_KEY], dtype=np.float32) for frame in dataset.frames]
+    )
+    expected_actions = np.stack(
+        [
+            np.concatenate(
+                [
+                    np.asarray(generate_mock_action(step)["joint"], dtype=np.float32),
+                    np.atleast_1d(generate_mock_action(step)["gripper"]),
+                ]
+            )
+            for step in range(3)
+        ]
+    )
+    saved_states = np.stack(
+        [np.asarray(frame[STATE_KEY], dtype=np.float32) for frame in dataset.frames]
+    )
+
+    np.testing.assert_allclose(saved_actions, expected_actions)
+    assert not np.allclose(saved_actions[:-1], saved_states[1:])
 
 
 def test_rollout_success_labels():
@@ -238,7 +329,7 @@ def test_rollout_success_labels():
     assert np.allclose(reward_labels, [-0.25, -0.25, -0.25, 0.0]), f"rollout success reward_label 错误: {reward_labels}"
     assert adv_ind == ["none"] * 4, f"rollout success adv_ind 错误: {adv_ind}"
     print("✓ rollout 成功标签正确")
-    return True
+    return
 
 
 def test_rollout_failure_labels_and_value_regression():
@@ -263,7 +354,7 @@ def test_rollout_failure_labels_and_value_regression():
     assert adv_ind == ["none"] * 4, f"rollout failure adv_ind 错误: {adv_ind}"
     assert np.allclose(value_labels, [-2.0, -2.0, -2.0, -2.0]), f"value_label 回归: {value_labels}"
     print("✓ rollout 失败标签和值回归正确")
-    return True
+    return
 
 
 def test_move_detection():
@@ -276,19 +367,34 @@ def test_move_detection():
     collector = create_collector(dataset=dataset, move_check=True)
 
     controllers_data, sensors_data = generate_mock_data(0)
-    collector.collect(controllers_data, sensors_data, False)
+    collector.collect(
+        controllers_data,
+        sensors_data,
+        action_data=generate_mock_action(0),
+        is_intervention=False,
+    )
     print(f"  帧1: 收集 (缓存: {len(collector.episode_buffer)})")
 
-    collector.collect(controllers_data, sensors_data, False)
+    collector.collect(
+        controllers_data,
+        sensors_data,
+        action_data=generate_mock_action(0),
+        is_intervention=False,
+    )
     print(f"  帧2: 静止，应跳过 (缓存: {len(collector.episode_buffer)})")
 
     controllers_data, sensors_data = generate_mock_data(10)
-    collector.collect(controllers_data, sensors_data, False)
+    collector.collect(
+        controllers_data,
+        sensors_data,
+        action_data=generate_mock_action(10),
+        is_intervention=False,
+    )
     print(f"  帧3: 移动 (缓存: {len(collector.episode_buffer)})")
 
     assert len(collector.episode_buffer) == 2, "应该只收集了 2 帧"
     print("✓ 移动检测测试通过")
-    return True
+    return
 
 
 def run_all_tests():
@@ -300,7 +406,9 @@ def run_all_tests():
     tests = [
         ("新数据集 schema", test_dataset_schema_creation),
         ("旧 schema 拦截", test_existing_schema_validation),
+        ("旧 state/actions schema 拦截", test_legacy_state_actions_schema_is_rejected),
         ("teleop 成功标签", test_teleop_success_labels),
+        ("真实 pilot action", test_explicit_pilot_action_is_saved_instead_of_next_state),
         ("rollout 成功标签", test_rollout_success_labels),
         ("rollout 失败标签和值回归", test_rollout_failure_labels_and_value_regression),
         ("移动检测", test_move_detection),
@@ -309,8 +417,8 @@ def run_all_tests():
     results = []
     for name, test_func in tests:
         try:
-            success = test_func()
-            results.append((name, success))
+            test_func()
+            results.append((name, True))
         except Exception as exc:
             print(f"\n✗ 测试失败: {exc}")
             import traceback

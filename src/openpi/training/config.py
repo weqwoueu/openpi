@@ -441,6 +441,7 @@ class LeRobotPiperDataConfig(DataConfigFactory):
 
     extra_delta_transform: bool = False
     adv_ind_dropout: bool = True # Set to True during training to apply adv_ind dropout in model transforms
+    action_sequence_keys: Sequence[str] = ("action",)
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -458,11 +459,11 @@ class LeRobotPiperDataConfig(DataConfigFactory):
                     _transforms.RepackTransform(
                         {
                             "images": {
-                                    "cam_high": "image",
-                                    "cam_wrist": "wrist_image",
+                                    "cam_high": "observation.images.cam_head",
+                                    "cam_wrist": "observation.images.cam_wrist",
                             },
-                            "state": "state",
-                            "actions": "actions",
+                            "state": "observation.state",
+                            "actions": "action",
                             "prompt": "prompt",
                         }
                     )
@@ -474,11 +475,11 @@ class LeRobotPiperDataConfig(DataConfigFactory):
                     _transforms.RepackTransform(
                         {
                             "images": {
-                                    "cam_high": "image",
-                                    "cam_wrist": "wrist_image",
+                                    "cam_high": "observation.images.cam_head",
+                                    "cam_wrist": "observation.images.cam_wrist",
                             },
-                            "state": "state",
-                            "actions": "actions",
+                            "state": "observation.state",
+                            "actions": "action",
                             "prompt": "prompt",
                             "adv_ind": "adv_ind", 
                             # add adv_ind and filter out value, reward, epsilon, adv produced in pistar data processing
@@ -527,6 +528,7 @@ class LeRobotPiperDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
         )
 
 

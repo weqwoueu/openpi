@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 import threading
+import time
 
 import numpy as np
 
@@ -47,6 +48,31 @@ def test_control_loop_stop_keeps_live_thread_until_callback_finishes():
     assert control_loop.stop(timeout=0.01) is False
     release_callback.set()
     assert control_loop.stop(timeout=0.5) is True
+
+
+def test_control_loop_exposes_an_isolated_latest_action_snapshot():
+    action_ready = threading.Event()
+    sent_action = {"joint": [0.1] * 6, "gripper": 0.25}
+
+    def send_command():
+        action_ready.set()
+        return sent_action
+
+    control_loop = FixedRateControlLoop(control_fps=30, step=send_command)
+    control_loop.start()
+    try:
+        assert action_ready.wait(timeout=0.5)
+        latest = None
+        deadline = time.monotonic() + 0.5
+        while latest is None and time.monotonic() < deadline:
+            latest = control_loop.get_latest()
+            time.sleep(0.005)
+        assert latest == sent_action
+
+        latest["joint"][0] = 99.0
+        assert control_loop.get_latest()["joint"][0] == 0.1
+    finally:
+        control_loop.stop()
 
 
 def test_ema_then_slew_matches_robocoin_piperx_settings():

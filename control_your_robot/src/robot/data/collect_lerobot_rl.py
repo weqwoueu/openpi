@@ -22,6 +22,8 @@ REWARD_KEY = "reward"
 REWARD_LABEL_KEY = "reward_label"
 ADV_IND_KEY = "adv_ind"
 INTERVENTION_KEY = "intervention"
+STATE_KEY = "observation.state"
+ACTION_KEY = "action"
 
 
 class CollectLeRobotRL:
@@ -33,7 +35,7 @@ class CollectLeRobotRL:
         output_dir: str,
         task_name: str,
         fps: int = 10,
-        robot_type: str = "piper",
+        robot_type: str = "piperx",
         state_dim: int = 7,
         action_dim: int = 7,
         image_size: tuple = (720,1280),
@@ -115,6 +117,9 @@ class CollectLeRobotRL:
     def _get_required_feature_keys(self) -> set[str]:
         """返回写入当前收集器所需的字段集合。"""
         return {
+            STATE_KEY,
+            ACTION_KEY,
+            *self.camera_keys.values(),
             INTERVENTION_KEY,
             self.value_label_key,
             REWARD_KEY,
@@ -188,11 +193,12 @@ class CollectLeRobotRL:
                     root=output_path,
                 )
                 self._sync_value_label_key_from_dataset()
+                self._ensure_dataset_schema_for_writes()
 
                 # 启动 image writer
                 self.dataset.start_image_writer(
-                    num_processes=5,
-                    num_threads=10,
+                    num_processes=0,
+                    num_threads=8,
                 )
 
                 debug_print("collect_lerobot_rl", f"✓ 数据集加载成功（快速模式，当前有 {self.dataset.num_episodes} 个 episodes）", "INFO")
@@ -211,12 +217,12 @@ class CollectLeRobotRL:
 
             # 构建 features 配置
             features = {
-                "state": {
+                STATE_KEY: {
                     "dtype": "float32",
                     "shape": (self.state_dim,),
                     "names": self._get_state_names(),
                 },
-                "actions": {
+                ACTION_KEY: {
                     "dtype": "float32",
                     "shape": (self.action_dim,),
                     "names": self._get_action_names(),
@@ -253,9 +259,9 @@ class CollectLeRobotRL:
             # 添加图像特征
             for camera_name, lerobot_key in self.camera_keys.items():
                 features[lerobot_key] = {
-                    "dtype": "image",
+                    "dtype": "video",
                     "shape": (3, self.image_size[0], self.image_size[1]),
-                    "names": ["channels", "height","width"],
+                    "names": ["channels", "height", "width"],
                 }
 
             # 创建数据集
@@ -265,8 +271,9 @@ class CollectLeRobotRL:
                 robot_type=self.robot_type,
                 fps=self.fps,
                 features=features,
-                image_writer_threads=10,
-                image_writer_processes=5,
+                use_videos=True,
+                image_writer_threads=8,
+                image_writer_processes=0,
             )
             self.value_label_key = VALUE_LABEL_KEY
             debug_print("collect_lerobot_rl", f"LeRobot 数据集创建成功", "INFO")
@@ -289,13 +296,14 @@ class CollectLeRobotRL:
         """生成 action 字段名"""
         return self._get_state_names()
 
-    def collect(self, controllers_data, sensors_data, is_intervention: bool = False):
+    def collect(self, controllers_data, sensors_data, *, action_data, is_intervention: bool = False):
         """
         收集一帧数据到缓存
 
         Args:
             controllers_data: 控制器数据
             sensors_data: 传感器数据
+            action_data: 该帧对应的实际下发命令（6 关节 + 夹爪）
             is_intervention: 是否为人工干预模式 (True=1, False=0)
         """
         # 第一次收集时创建数据集
@@ -318,6 +326,7 @@ class CollectLeRobotRL:
         frame_data = {
             "controllers": controllers_data,
             "sensors": sensors_data,
+            "action": self._extract_action(action_data),
         }
 
         self.episode_buffer.append(frame_data)
@@ -355,19 +364,22 @@ class CollectLeRobotRL:
                    f"开始保存 episode ({len(self.episode_buffer)} 帧, 成功: {success}, adv_ind: {adv_ind_value})",
                    "INFO")
 
-        # 提取 state 和 action
+        # observation 来自从臂反馈，action 来自该帧同步保存的真实下发命令。
         states = []
         for frame in self.episode_buffer:
             state = self._extract_state(frame["controllers"])
             states.append(state)
+        actions = [frame["action"] for frame in self.episode_buffer]
 
-        # action = 下一帧的 state
-        actions = []
-        for i in range(len(states)):
-            if i < len(states) - 1:
-                actions.append(states[i + 1])
-            else:
-                actions.append(states[-1])  # 最后一帧重复
+        state_span = np.ptp(torch.stack(states).cpu().numpy(), axis=0)
+        action_span = np.ptp(torch.stack(actions).cpu().numpy(), axis=0)
+        debug_print(
+            "collect_lerobot_rl",
+            "本回合各维变化范围 "
+            f"state={np.array2string(state_span, precision=4)} "
+            f"action={np.array2string(action_span, precision=4)}",
+            "INFO",
+        )
 
         # 计算价值标签
         episode_length = len(self.episode_buffer)
@@ -383,8 +395,8 @@ class CollectLeRobotRL:
         # 逐帧添加到 LeRobot 数据集
         for i, frame in enumerate(self.episode_buffer):
             lerobot_frame = {
-                "state": states[i],
-                "actions": actions[i],
+                STATE_KEY: states[i],
+                ACTION_KEY: actions[i],
                 INTERVENTION_KEY: torch.tensor([self.intervention_flags[i]], dtype=torch.int64),
                 self.value_label_key: torch.tensor([value_labels[i]], dtype=torch.float32),
                 REWARD_KEY: torch.tensor([rewards[i]], dtype=torch.float32),
@@ -550,6 +562,33 @@ class CollectLeRobotRL:
 
         state = np.concatenate(state_list).astype(np.float32)
         return torch.from_numpy(state)
+
+    def _extract_action(self, action_data):
+        """将实际下发的单臂/双臂命令转换成固定维度 float32 action。"""
+        if action_data is None:
+            raise ValueError("action_data is required; next-state fallback is not allowed")
+
+        if isinstance(action_data, dict) and any(
+            arm_name in action_data for arm_name in ("left_arm", "right_arm")
+        ):
+            action = self._extract_state(action_data).numpy()
+        elif isinstance(action_data, dict):
+            if "joint" not in action_data or "gripper" not in action_data:
+                raise ValueError("action_data dict must contain joint and gripper")
+            action = np.concatenate(
+                [
+                    np.asarray(action_data["joint"], dtype=np.float32).reshape(-1),
+                    np.asarray(action_data["gripper"], dtype=np.float32).reshape(-1),
+                ]
+            )
+        else:
+            action = np.asarray(action_data, dtype=np.float32).reshape(-1)
+
+        if action.shape != (self.action_dim,):
+            raise ValueError(f"action_data shape must be ({self.action_dim},), got {action.shape}")
+        if not np.all(np.isfinite(action)):
+            raise ValueError("action_data contains non-finite values")
+        return torch.from_numpy(action.astype(np.float32, copy=True))
 
     def _extract_images(self, sensors_data):
         """

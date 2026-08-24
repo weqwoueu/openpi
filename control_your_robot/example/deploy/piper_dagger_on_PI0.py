@@ -476,15 +476,15 @@ if __name__ == "__main__":
         output_dir=OUTPUT_DIR,
         task_name=TASK_NAME,
         fps=FPS,
-        robot_type="piper",
+        robot_type="piperx",
         state_dim=7,
         action_dim=7,
         image_size=(720,1280),
         camera_keys={
-            "cam_head": "image",
-            "cam_wrist": "wrist_image",
+            "cam_head": "observation.images.cam_head",
+            "cam_wrist": "observation.images.cam_wrist",
         },
-        move_check=True,
+        move_check=False,
         tolerance=0.002,  
         penalty_value=PENALTY_VALUE,
     )
@@ -581,9 +581,15 @@ if __name__ == "__main__":
 
                 # 收集数据（仍然按 10Hz 收集）
                 current_time = time.time()
-                if current_time - last_time >= 1 / FPS:
-                    follower_controller = {"left_arm": data[0]["left_arm"]}
-                    collector.collect(follower_controller, data[1], is_intervention=True)
+                if current_time - last_time >= 1 / FPS and last_cmd is not None:
+                    sample_data = robot.get()
+                    follower_controller = {"left_arm": sample_data[0]["left_arm"]}
+                    collector.collect(
+                        follower_controller,
+                        sample_data[1],
+                        action_data=last_cmd,
+                        is_intervention=True,
+                    )
                     step += 1
                     last_time = current_time
 
@@ -612,7 +618,12 @@ if __name__ == "__main__":
                 robot.move_follower(move_data)
                 data = robot.get()
                 follower_controller = {"left_arm": data[0]["left_arm"]}
-                collector.collect(follower_controller, data[1], is_intervention=False)
+                collector.collect(
+                    follower_controller,
+                    data[1],
+                    action_data=move_data,
+                    is_intervention=False,
+                )
                 step += 1
 
                 current_time = time.time()

@@ -195,7 +195,10 @@ def RobotWorkerLeRobot(
 
                 move_data = _read_master_action(master, teleop_kwargs)
                 if move_data is not None:
-                    robot.move({"arm": {"left_arm": action_filter.process(move_data)}})
+                    filtered_action = action_filter.process(move_data)
+                    robot.move({"arm": {"left_arm": filtered_action}})
+                    return filtered_action
+                return None
             except Exception as e:
                 debug_print(process_name, f"镜像控制错误: {e}", "DEBUG")
 
@@ -229,8 +232,16 @@ def RobotWorkerLeRobot(
 
                 try:
                     # 相机/数据采集保持 10 Hz，不阻塞独立的 30 Hz PiperX 控制线程。
+                    action_data = control_loop.get_latest() if control_loop is not None else None
+                    if action_data is None:
+                        continue
                     data = robot.get()
-                    robot.collection.collect(data[0], data[1], is_intervention=True)
+                    robot.collection.collect(
+                        data[0],
+                        data[1],
+                        action_data=action_data,
+                        is_intervention=True,
+                    )
                 except Exception as e:
                     debug_print(process_name, f"错误: {e}", "ERROR")
 
@@ -260,6 +271,10 @@ def RobotWorkerLeRobot(
     finally:
         if control_loop is not None:
             control_loop.stop()
+
+        dataset = getattr(robot.collection, "dataset", None)
+        if dataset is not None:
+            dataset.stop_image_writer()
 
         # 清理：将主臂恢复到 FOLLOWER 模式
         if teleop_enabled and master is not None:
@@ -468,8 +483,11 @@ if __name__ == "__main__":
     os.environ["INFO_LEVEL"] = "INFO"  # DEBUG, INFO, ERROR
 
     # ==================== 配置参数 ====================
-    REPO_ID = "piperx/piperx_black_plug_demo_v1"
-    OUTPUT_DIR = "/home/standard/workspace/test/pistar/.cache/huggingface/lerobot"
+    REPO_ID = "piperx/piperx_black_plug_demo_v3"
+    OUTPUT_DIR = os.environ.get(
+        "HF_LEROBOT_HOME",
+        os.path.expanduser("~/.cache/huggingface/lerobot"),
+    )
     TASK_NAME = "put the white plug into the two-hole socket"
     FPS = 10
     NUM_EPISODES = 100
@@ -477,7 +495,7 @@ if __name__ == "__main__":
     # 主从设置：两根 CAN 线分别连接
     MASTER_CAN = "can_left_mas"
     SLAVE_CAN = "can_left_slave"
-    MOVE_CHECK = True
+    MOVE_CHECK = False
     ENABLE_SOFT_TELEOP = True
     ENABLE_DRAG_TEACH = True
     USE_MIT_MODE = True
@@ -680,4 +698,5 @@ if __name__ == "__main__":
             robot_process.join(timeout=2)
             if robot_process.is_alive():
                 robot_process.terminate()
+                robot_process.join()
             robot_process.close()
