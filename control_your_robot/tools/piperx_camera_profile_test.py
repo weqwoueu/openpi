@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the two RealSense cameras with PiStar's production profile order."""
+"""Validate both PiperX RealSense cameras at 640x480@30."""
 
 from __future__ import annotations
 
@@ -29,13 +29,8 @@ CAMERAS = (
     CameraSpec(role="wrist", serial="230322274885", model_token="D405"),
 )
 
-# Keep this order aligned with robot/sensor/Realsense_sensor.py.
-PROFILE_ORDER = (
-    (1280, 720, 10),
-    (1280, 720, 30),
-    (1280, 720, 15),
-    (640, 480, 30),
-)
+# Keep this aligned with robot/sensor/Realsense_sensor.py.
+PROFILE_ORDER = ((640, 480, 30),)
 
 
 def device_info(device: object, field: object) -> str:
@@ -88,7 +83,7 @@ def capture_frames(running: RunningCamera, frame_count: int, timeout_ms: int) ->
             )
 
 
-def start_with_production_fallback(
+def start_production_profile(
     spec: CameraSpec, frame_count: int, timeout_ms: int, rs_module: object
 ) -> RunningCamera:
     errors: list[str] = []
@@ -125,7 +120,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Check the fixed D435I head and D405 wrist serials, then start them "
-            "together using PiStar's RealSense profile fallback order."
+            "together at PiStar's fixed 640x480@30 profile."
         )
     )
     parser.add_argument(
@@ -174,8 +169,8 @@ def main() -> int:
         for profile in PROFILE_ORDER:
             status = "yes" if profile in supported else "no"
             print(f"  {profile[0]}x{profile[1]}@{profile[2]}: {status}")
-        if not any(width == 1280 and height == 720 for width, height, _ in supported):
-            print(f"ERROR: {spec.role} has no 1280x720 BGR8 profile", file=sys.stderr)
+        if (640, 480, 30) not in supported:
+            print(f"ERROR: {spec.role} has no 640x480@30 BGR8 profile", file=sys.stderr)
             support_error = True
 
     if support_error:
@@ -189,7 +184,7 @@ def main() -> int:
         # Production initializes head first and keeps it running while wrist starts.
         for spec in CAMERAS:
             running_cameras.append(  # noqa: PERF401 - preserve partial state for cleanup
-                start_with_production_fallback(spec, args.frames, args.timeout_ms, rs_module)
+                start_production_profile(spec, args.frames, args.timeout_ms, rs_module)
             )
 
         # Re-read both after both pipelines are active to expose USB bandwidth issues.
@@ -198,11 +193,11 @@ def main() -> int:
             width, height, fps = running.profile
             print(f"SIMULTANEOUS PASS: role={running.spec.role} profile={width}x{height}@{fps} frames={args.frames}")
 
-        non_720p = [running for running in running_cameras if running.profile[0:2] != (1280, 720)]
-        if non_720p:
-            for running in non_720p:
+        wrong_profiles = [running for running in running_cameras if running.profile != (640, 480, 30)]
+        if wrong_profiles:
+            for running in wrong_profiles:
                 print(
-                    f"ERROR: {running.spec.role} fell back to {running.profile[0]}x{running.profile[1]}",
+                    f"ERROR: {running.spec.role} started unexpected profile {running.profile}",
                     file=sys.stderr,
                 )
             return 1

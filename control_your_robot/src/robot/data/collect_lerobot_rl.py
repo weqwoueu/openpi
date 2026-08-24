@@ -38,7 +38,7 @@ class CollectLeRobotRL:
         robot_type: str = "piperx",
         state_dim: int = 7,
         action_dim: int = 7,
-        image_size: tuple = (720,1280),
+        image_size: tuple = (480, 640),
         camera_keys: dict = None,
         move_check: bool = True,
         tolerance: float = 0.002,  

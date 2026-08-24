@@ -49,7 +49,7 @@ class PiperSingleLeRobot(RobotLeRobot):
             robot_type="piperx",
             state_dim=7,  # 单臂：6关节 + 1夹爪
             action_dim=7,
-            image_size=(720,1280),  # 更新为 1280x720 分辨率
+            image_size=(480, 640),
             camera_keys=camera_keys,
             move_check=move_check,
             tolerance=0.0005,

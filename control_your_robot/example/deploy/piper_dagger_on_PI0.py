@@ -479,7 +479,7 @@ if __name__ == "__main__":
         robot_type="piperx",
         state_dim=7,
         action_dim=7,
-        image_size=(720,1280),
+        image_size=(480, 640),
         camera_keys={
             "cam_head": "observation.images.cam_head",
             "cam_wrist": "observation.images.cam_wrist",

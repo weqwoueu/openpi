@@ -213,7 +213,7 @@ features = {
 
 ```python
 robot = PiperSingleLeRobot(
-    image_size=(720,1280)
+    image_size=(480, 640)
 )
 ```
 

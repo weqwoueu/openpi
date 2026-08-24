@@ -49,12 +49,7 @@ class RealsenseSensor(VisionSensor):
             if device_idx is None:
                 raise RuntimeError(f"Could not find camera with serial number {serial}")
 
-            stream_profiles = [
-                (1280, 720, 10),
-                (1280, 720, 30),
-                (1280, 720, 15),
-                (640, 480, 30),
-            ]
+            stream_profiles = [(640, 480, 30)]
             start_errors = []
 
             for width, height, fps in stream_profiles:
