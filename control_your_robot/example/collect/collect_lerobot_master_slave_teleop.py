@@ -499,10 +499,10 @@ if __name__ == "__main__":
     os.environ["INFO_LEVEL"] = "INFO"  # DEBUG, INFO, ERROR
 
     # ==================== 配置参数 ====================
-    REPO_ID = "piperx/piperx_black_plug_demo"
-    OUTPUT_DIR = "/home/standard/agilex/lerobot"
+    REPO_ID = os.environ.get("PIPERX_REPO_ID", "piperx/piperx_black_plug_demo")
+    OUTPUT_DIR = os.environ.get("PIPERX_OUTPUT_DIR", "/home/standard/agilex/lerobot")
     TASK_NAME = "put the black plug into the two-hole socket"
-    FPS = 10
+    FPS = 30
     NUM_EPISODES = 100
 
     # 主从设置：两根 CAN 线分别连接
@@ -515,7 +515,7 @@ if __name__ == "__main__":
     FALLBACK_TO_FEEDBACK = False
 
     # 与 robocoin scripts/piperx/run_dagger.sh 一致的遥操控制链
-    CONTROL_FPS = 30
+    CONTROL_FPS = 60
     TEACHER_ACTION_EMA_ENABLED = True
     TEACHER_ACTION_EMA_ALPHA = 0.80
     TEACHER_ACTION_SLEW_ENABLED = True

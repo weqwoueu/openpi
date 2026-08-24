@@ -4,7 +4,6 @@ set -euo pipefail
 
 # Edit these paths manually.
 # REPO_ROOT must contain my_env.sh and control_your_robot/.
-REPO_ROOT="/home/standard/workspace/pistar/openpi"
 DATASET_DIR="/home/standard/下载/piperx_black_plug_demo_v3"
 
 EPISODE_INDEX=0
