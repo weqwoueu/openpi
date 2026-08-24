@@ -3117,7 +3117,9 @@ dependencies = [
     { name = "openpi-client" },
     { name = "orbax-checkpoint" },
     { name = "pillow" },
+    { name = "piper-sdk" },
     { name = "polars" },
+    { name = "pyrealsense2" },
     { name = "rich" },
     { name = "sentencepiece" },
     { name = "torch" },
@@ -3168,7 +3170,9 @@ requires-dist = [
     { name = "openpi-client", editable = "packages/openpi-client" },
     { name = "orbax-checkpoint", specifier = "==0.11.13" },
     { name = "pillow", specifier = ">=11.0.0" },
+    { name = "piper-sdk", specifier = "==0.6.1" },
     { name = "polars", specifier = ">=1.30.0" },
+    { name = "pyrealsense2", specifier = "==2.56.5.9235" },
     { name = "rich", specifier = ">=14.0.0" },
     { name = "sentencepiece", specifier = ">=0.2.0" },
     { name = "torch", specifier = "==2.7.1" },
@@ -3423,6 +3427,18 @@ wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/f6/20/5c0a0aa83b213b7a07ec01e71a3d6ea2cf4ad1d2c686cc0168173b6089e7/pillow-11.2.1-pp311-pypy311_pp73-manylinux_2_28_aarch64.whl", hash = "sha256:036e53f4170e270ddb8797d4c590e6dd14d28e15c7da375c18978045f7e6c37b", size = 3527165, upload-time = "2025-04-12T17:49:55.164Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/58/0e/2abab98a72202d91146abc839e10c14f7cf36166f12838ea0c4db3ca6ecb/pillow-11.2.1-pp311-pypy311_pp73-manylinux_2_28_x86_64.whl", hash = "sha256:14f73f7c291279bd65fda51ee87affd7c1e097709f7fdd0188957a16c264601f", size = 3571586, upload-time = "2025-04-12T17:49:57.171Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/21/2c/5e05f58658cf49b6667762cca03d6e7d85cededde2caf2ab37b81f80e574/pillow-11.2.1-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:208653868d5c9ecc2b327f9b9ef34e0e42a4cdd172c2988fd81d62d2bc9bc044", size = 2674751, upload-time = "2025-04-12T17:49:59.628Z" },
+]
+
+[[package]]
+name = "piper-sdk"
+version = "0.6.1"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple/" }
+dependencies = [
+    { name = "python-can" },
+]
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/b5/c4/06172af8276170ff0f484e2065f853eef53d7ced3cc822730f55ea110f3b/piper_sdk-0.6.1.tar.gz", hash = "sha256:2a154870992379f5048caf70662fdbb29f11b7cb17846d6a23afc07cd3d57217", size = 161302, upload-time = "2025-10-30T06:38:53.054Z" }
+wheels = [
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/a8/0c/4473a7a9aca9c50798abec6a77e8e5e714ad968399db3d2b86162a05177c/piper_sdk-0.6.1-py3-none-any.whl", hash = "sha256:743557e1b8dfe685f2c33d728ab28c3ff510de8860d6494e54ed5d801493d65c", size = 193748, upload-time = "2025-10-30T06:38:51.368Z" },
 ]
 
 [[package]]
@@ -3961,6 +3977,19 @@ wheels = [
 ]
 
 [[package]]
+name = "pyrealsense2"
+version = "2.56.5.9235"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple/" }
+wheels = [
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/1f/ab/f2c066a11f632dfcd79b467e728623da9489ed524eb36ec0cc14b497661a/pyrealsense2-2.56.5.9235-cp311-cp311-manylinux1_x86_64.whl", hash = "sha256:76d384ea99f257b4697a82cb3581b05cc69fadfd0701021ad76da098a3e240f0", size = 11067319, upload-time = "2025-07-28T14:59:23.129Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/c7/c7/c609730c3587c395c3097a98c2d856914997454967bea07b3f8849c4af03/pyrealsense2-2.56.5.9235-cp311-cp311-win_amd64.whl", hash = "sha256:7761f610876c0d0039c9dff71f28ae7e73c77f353f1f3b60fb083350d6acf280", size = 7801923, upload-time = "2025-07-28T14:59:24.986Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/fc/20/a46e60a496a17f1cf0cbdffb45e66dc015756e4dbce83580fd569e53e178/pyrealsense2-2.56.5.9235-cp312-cp312-manylinux1_x86_64.whl", hash = "sha256:ba2c22981111adbefb169c39e023af4352a2409dfbff59f02c2404c68b82064b", size = 11062766, upload-time = "2025-07-28T14:59:26.551Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/22/b5/dd8349abac780aed774f65825fc2ed3ca832b0ad2bf3293262bfa9a517b2/pyrealsense2-2.56.5.9235-cp312-cp312-win_amd64.whl", hash = "sha256:e9c64b94cf6170a3ad60416ff1bf969df8aafe383d4bff14e0fa10b2459d885b", size = 7801788, upload-time = "2025-07-28T14:59:28.303Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/a8/66/fa706f1d906a06d5e7015d5b412a48de9914549792eb5cb53c1854e06427/pyrealsense2-2.56.5.9235-cp313-cp313-manylinux1_x86_64.whl", hash = "sha256:c203bc8c79d5958889681408f1038ee69b0021fd8cba7ff2d4532fc90295c4fc", size = 11062717, upload-time = "2025-07-28T14:59:30.072Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/b2/88/19425ce6fa809d31a8d23f46dfa6aed9b16a881e8a00e0162d4b97ba1e64/pyrealsense2-2.56.5.9235-cp313-cp313-win_amd64.whl", hash = "sha256:ad8012f7fec843c3c6ec8904bfff048806dc7b4c7709e021c6ea75e83d8d5096", size = 7802471, upload-time = "2025-07-28T14:59:31.985Z" },
+]
+
+[[package]]
 name = "pysocks"
 version = "1.7.1"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple/" }
@@ -3982,6 +4011,20 @@ dependencies = [
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/ae/3c/c9d525a414d506893f0cd8a8d0de7706446213181570cdbd766691164e40/pytest-8.3.5.tar.gz", hash = "sha256:f4efe70cc14e511565ac476b57c279e12a855b11f48f212af1080ef2263d3845", size = 1450891, upload-time = "2025-03-02T12:54:54.503Z" }
 wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/30/3d/64ad57c803f1fa1e963a7946b6e0fea4a70df53c1a7fed304586539c2bac/pytest-8.3.5-py3-none-any.whl", hash = "sha256:c69214aa47deac29fad6c2a4f590b9c4a9fdb16a403176fe154b79c0b4d4d820", size = 343634, upload-time = "2025-03-02T12:54:52.069Z" },
+]
+
+[[package]]
+name = "python-can"
+version = "4.6.1"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple/" }
+dependencies = [
+    { name = "packaging" },
+    { name = "typing-extensions" },
+    { name = "wrapt" },
+]
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/74/f9/a9d99d36dd33be5badb747801c9255c3c526171a5542092eaacc73350fb8/python_can-4.6.1.tar.gz", hash = "sha256:290fea135d04b8504ebff33889cc6d301e2181a54099116609f940825ffe5005", size = 1206049, upload-time = "2025-08-12T07:44:58.314Z" }
+wheels = [
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/58/34/e4ac153acdbcfba7f48bc73d6586a74c91cc919fcc2e29acbf81be329d1f/python_can-4.6.1-py3-none-any.whl", hash = "sha256:17f95255868a95108dcfcb90565a684dad32d5a3ebb35afd14f739e18c84ff6c", size = 276996, upload-time = "2025-08-12T07:44:56.55Z" },
 ]
 
 [[package]]

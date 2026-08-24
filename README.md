@@ -6,20 +6,11 @@ Using uv to manage virtual environment.
 
 ```bash
 git clone https://github.com/ybpy/pistar.git
-
-git submodule update --init --recursive
-
-uv venv --python 3.11.9 /path/to/create/pistar/venv
-
-source /path/to/your/pistar/venv/bin/activate
-
 cd /path/to/pistar
 
-GIT_LFS_SKIP_SMUDGE=1 uv sync --active
-
-GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
-
-uv pip install -r pistar_requirements.txt
+uv venv --python 3.11.9 .venv
+source my_env.sh
+uv sync --active --frozen
 
 sudo -E apt update && sudo -E apt install screen -y
 ```
@@ -261,8 +252,9 @@ After the VLM completes `adv_ind` labeling, return to the PiStar environment and
 The real-robot scripts are under the `control_your_robot` directory. It is recommended to run them from this directory to avoid relative path and local import issues:
 
 ```bash
-cd /path/to/pistar/control_your_robot
-export PYTHONPATH=$PWD:$PWD/src:$PYTHONPATH
+cd /path/to/pistar
+source my_env.sh
+cd control_your_robot
 ```
 
 ### 1. Collect real-robot demo data
