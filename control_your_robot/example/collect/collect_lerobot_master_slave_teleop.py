@@ -181,10 +181,18 @@ def RobotWorkerLeRobot(
         except Exception as e:
             debug_print(process_name, f"从臂控制模式设置失败: {e}", "WARNING")
 
-        aligned_state = _align_master_to_follower_pose(robot, master, teleop_kwargs, process_name)
+        aligned_state = _align_master_to_follower_pose(
+            robot,
+            master,
+            teleop_kwargs,
+            process_name,
+            log_failure=False,
+        )
         if aligned_state is not None:
             teleop_kwargs["alignment_ready"] = True
             action_filter.seed(aligned_state["joint"], aligned_state["gripper"])
+        else:
+            debug_print(process_name, "主臂控制帧尚未就绪，将在后台继续对齐", "INFO")
 
         def teleop_control_step():
             try:

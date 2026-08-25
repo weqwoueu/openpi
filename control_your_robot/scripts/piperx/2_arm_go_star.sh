@@ -19,9 +19,13 @@ fi
 
 source "$ENV_SCRIPT"
 
-echo "[1/2] Move follower to the task initial pose"
+echo "[1/3] Move follower to the task initial pose"
 bash "${PIPERX_SCRIPTS}/one_arm_go_init.sh" can_left_slave "$SPEED" "$GRIPPER"
 sleep "$MOVE_WAIT_SECONDS"
 
-echo "[2/2] Move master to the task initial pose"
+echo "[2/3] Move master to zero"
+bash "${PIPERX_SCRIPTS}/one_arm_go_zero.sh" can_left_mas "$SPEED" "$GRIPPER"
+sleep "$MOVE_WAIT_SECONDS"
+
+echo "[3/3] Move master to the task initial pose"
 bash "${PIPERX_SCRIPTS}/one_arm_go_init.sh" can_left_mas "$SPEED" "$GRIPPER"
