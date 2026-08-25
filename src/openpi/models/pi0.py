@@ -214,7 +214,7 @@ class Pi0(_model.BaseModel):
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
         if not self.pistar:
-            return jnp.mean(jnp.square(v_t - u_t))
+            return jnp.mean(jnp.square(v_t - u_t), axis=-1)
         else:
             # Compute per-timestep loss: (b, ah)
             per_timestep_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)

@@ -147,7 +147,7 @@ def train_step(
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
-        return model.compute_loss(rng, observation, actions, train=True)
+        return jnp.mean(model.compute_loss(rng, observation, actions, train=True))
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch

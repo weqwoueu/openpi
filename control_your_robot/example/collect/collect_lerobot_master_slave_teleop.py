@@ -12,6 +12,7 @@
    python example/collect/collect_lerobot_master_slave_teleop.py
 """
 
+import json
 import sys
 
 sys.path.append("./")
@@ -19,6 +20,7 @@ import time
 import tty
 import termios
 from multiprocessing import Process, Event, Barrier
+from pathlib import Path
 
 import numpy as np
 
@@ -56,6 +58,52 @@ class _StdinCbreak:
     def __exit__(self, exc_type, exc, tb):
         if self._old_settings is not None:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self._old_settings)
+
+
+def _read_existing_episode_count(output_dir: str, repo_id: str) -> int:
+    """Read the number of already-saved episodes for recorder resume."""
+    info_path = Path(output_dir) / repo_id / "meta" / "info.json"
+    if not info_path.exists():
+        return 0
+
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    total_episodes = info.get("total_episodes")
+    if isinstance(total_episodes, bool) or not isinstance(total_episodes, int) or total_episodes < 0:
+        raise ValueError(f"Invalid total_episodes in {info_path}: {total_episodes!r}")
+    return total_episodes
+
+
+def _collect_synchronized_sample(robot, control_loop, *, discard_sample: bool) -> bool:
+    """Consume one synchronized robot sample, optionally without recording it."""
+    action_data = control_loop.get_latest() if control_loop is not None else None
+    if action_data is None:
+        return False
+
+    controllers_data, sensors_data = robot.get()
+    if not discard_sample:
+        robot.collection.collect(
+            controllers_data,
+            sensors_data,
+            action_data=action_data,
+            is_intervention=True,
+        )
+    return True
+
+
+def _complete_current_episode(
+    collection,
+    *,
+    save_requested: bool,
+    discard_requested: bool,
+    exit_requested: bool,
+) -> bool:
+    """Save only an explicitly completed episode; all other paths discard it."""
+    if save_requested and not discard_requested and not exit_requested:
+        collection.save_episode(success=True, adv_ind_value="positive")
+        return True
+
+    collection.clear_current_episode()
+    return False
 
 
 def RobotWorkerLeRobot(
@@ -219,6 +267,8 @@ def RobotWorkerLeRobot(
 
     debug_print(process_name, "初始化完成，等待主进程指令...", "INFO")
 
+    discard_first_sync_sample = True
+
     try:
         while not exit_event.is_set():
             # 1. 等待开始信号（同时让从臂跟随主臂）
@@ -243,32 +293,40 @@ def RobotWorkerLeRobot(
                     break
 
                 try:
-                    # 相机/数据采集保持 10 Hz，不阻塞独立的 30 Hz PiperX 控制线程。
-                    action_data = control_loop.get_latest() if control_loop is not None else None
-                    if action_data is None:
-                        continue
-                    data = robot.get()
-                    robot.collection.collect(
-                        data[0],
-                        data[1],
-                        action_data=action_data,
-                        is_intervention=True,
+                    # 相机/数据采集保持 30 Hz，不阻塞独立的 60 Hz PiperX 控制线程。
+                    sample_consumed = _collect_synchronized_sample(
+                        robot,
+                        control_loop,
+                        discard_sample=discard_first_sync_sample,
                     )
+                    if sample_consumed and discard_first_sync_sample:
+                        discard_first_sync_sample = False
+                        debug_print(process_name, "已丢弃进程启动后的首个同步采样", "INFO")
                 except Exception as e:
                     debug_print(process_name, f"错误: {e}", "ERROR")
 
-            # 2. 收到结束信号，检查是否需要放弃
-            if discard_event.is_set():
-                debug_print(process_name, "⚠ 放弃当前 episode，不保存数据", "WARNING")
-                # 清空缓存但不保存
-                robot.collection.clear_current_episode()
-            else:
+            # 2. 仅明确收到结束信号且未退出/放弃时保存。
+            save_requested = finish_event.is_set()
+            discard_requested = discard_event.is_set()
+            exit_requested = exit_event.is_set()
+            if save_requested and not discard_requested and not exit_requested:
                 debug_print(process_name, "收到结束信号，正在保存...", "INFO")
-                robot.collection.save_episode(success=True, adv_ind_value="positive")
+            episode_saved = _complete_current_episode(
+                robot.collection,
+                save_requested=save_requested,
+                discard_requested=discard_requested,
+                exit_requested=exit_requested,
+            )
+            if episode_saved:
                 debug_print(process_name, "✓ 保存成功！", "INFO")
+            else:
+                debug_print(process_name, "⚠ 当前 episode 已放弃，不保存数据", "WARNING")
 
             # 通知主进程处理完毕
             saved_event.set()
+
+            if exit_event.is_set():
+                break
 
             # 等待主进程重置信号
             while start_event.is_set() and not exit_event.is_set():
@@ -284,6 +342,9 @@ def RobotWorkerLeRobot(
     finally:
         if control_loop is not None:
             control_loop.stop()
+
+        # Ctrl+C、退出信号和异常路径都不能留下可被误保存的当前 buffer。
+        robot.collection.clear_current_episode()
 
         dataset = getattr(robot.collection, "dataset", None)
         if dataset is not None:
@@ -513,6 +574,8 @@ if __name__ == "__main__":
     FPS = 30
     NUM_EPISODES = 100
 
+    collected_episodes = _read_existing_episode_count(OUTPUT_DIR, REPO_ID)
+
     # 主从设置：两根 CAN 线分别连接
     MASTER_CAN = "can_left_mas"
     SLAVE_CAN = "can_left_slave"
@@ -558,7 +621,8 @@ if __name__ == "__main__":
     print(f"任务名称: {TASK_NAME}")
     print(f"采集频率: {FPS} Hz")
     print(f"遥操控制频率: {CONTROL_FPS} Hz")
-    print(f"计划收集: {NUM_EPISODES} 个 episodes")
+    print(f"数据集已有: {collected_episodes} 个 episodes")
+    print(f"目标总数: {NUM_EPISODES} 个 episodes")
     print(f"主臂 CAN: {MASTER_CAN}")
     print(f"从臂 CAN: {SLAVE_CAN}")
     print("从臂关节控制模式: MIT (0xAD)")
@@ -567,6 +631,10 @@ if __name__ == "__main__":
     print("提示: 这是软件主从模式（无需硬件主从配置）")
     print("      请确保主臂处于拖动示教模式")
     print("=" * 60)
+
+    if collected_episodes >= NUM_EPISODES:
+        print(f"数据集已达到目标总数，无需继续采集: {OUTPUT_DIR}/{REPO_ID}")
+        raise SystemExit(0)
 
     # 创建多进程同步工具 (只创建一次)
     time_lock = Barrier(1 + 1)  # 1个robot进程 + 1个time_scheduler
@@ -631,8 +699,6 @@ if __name__ == "__main__":
     time_scheduler = TimeScheduler(work_barrier=time_lock, time_freq=FPS)
 
     try:
-        collected_episodes = 0  # 成功收集的 episode 数量
-
         while collected_episodes < NUM_EPISODES:
             print(f"\n{'=' * 60}")
             print(f"Episode {collected_episodes + 1}/{NUM_EPISODES}")
@@ -705,12 +771,20 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
         print("\n程序中断，正在退出...")
+        discard_event.set()
+        finish_event.set()
+        exit_event.set()
+        time_scheduler.stop()
+        try:
+            time_lock.abort()
+        except Exception:
+            pass
     finally:
         # 清理
         exit_event.set()
         # 释放可能卡住的锁
         try:
-            time_lock.reset()
+            time_lock.abort()
         except Exception:
             pass
 

@@ -7,7 +7,6 @@ from typing import Literal, Protocol, SupportsIndex, TypeVar
 
 import jax
 import jax.numpy as jnp
-import openpi.shared.hf_datasets_compat  # noqa: F401
 import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
 import torch
@@ -18,32 +17,6 @@ from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
 
 T_co = TypeVar("T_co", covariant=True)
-
-
-def _hf_transform_to_torch_allow_dict(items_dict: dict):
-    """HuggingFace -> torch 转换，同时允许 image bytes dict 原样通过。"""
-    from PIL import Image as PILImage
-    try:
-        from torchvision import transforms as tv_transforms
-
-        to_tensor = tv_transforms.ToTensor()
-    except Exception:
-        to_tensor = None
-    for key in items_dict:
-        first_item = items_dict[key][0]
-        if isinstance(first_item, PILImage.Image):
-            if to_tensor is None:
-                items_dict[key] = [torch.tensor(np.asarray(img)).permute(2, 0, 1) / 255.0 for img in items_dict[key]]
-            else:
-                items_dict[key] = [to_tensor(img) for img in items_dict[key]]
-        elif first_item is None:
-            pass
-        elif isinstance(first_item, dict):
-            # 例如 {"bytes": ...} 或 {"path": ...}，交给后续 ValueInputs 解析
-            items_dict[key] = items_dict[key]
-        else:
-            items_dict[key] = [x if isinstance(x, str) else torch.tensor(x) for x in items_dict[key]]
-    return items_dict
 
 
 class Dataset(Protocol[T_co]):
@@ -158,14 +131,7 @@ def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
     """Create a dataset for training."""
-    if data_config.local_data_dir is not None:
-        local_dir = data_config.local_data_dir
-        if not os.path.exists(local_dir):
-            raise ValueError(f"Local data directory does not exist: {local_dir}")
-        repo_id = local_dir
-    else:
-        repo_id = data_config.repo_id
-
+    repo_id = data_config.repo_id
     if repo_id is None:
         raise ValueError("Repo ID is not set. Cannot create dataset.")
     if repo_id == "fake":
@@ -178,9 +144,6 @@ def create_torch_dataset(
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
     )
-
-    if hasattr(dataset, "hf_dataset") and dataset.hf_dataset is not None:
-        dataset.hf_dataset.set_transform(_hf_transform_to_torch_allow_dict)
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
@@ -202,7 +165,7 @@ def create_rlds_dataset(
         shuffle=shuffle,
         action_chunk_size=action_horizon,
         action_space=data_config.action_space,
-        filter_dict_path=data_config.filter_dict_path,
+        datasets=data_config.datasets,
     )
 
 
