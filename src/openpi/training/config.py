@@ -1021,6 +1021,7 @@ _CONFIGS = [
             extra_delta_transform=False,
         ),
         batch_size=240,
+        num_workers=16,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
     ),

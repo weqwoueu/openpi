@@ -8,6 +8,7 @@ def test_pi05_piperx_plug_sft_contract():
     assert config.model.pistar is False
     assert config.model.action_dim == 32
     assert config.model.action_horizon == 50
+    assert config.num_workers == 16
 
     assert isinstance(config.data, _config.LeRobotPiperDataConfig)
     assert config.data.action_sequence_keys == ("action",)
