@@ -345,7 +345,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
     """
 
     extra_delta_transform: bool = False
-    adv_ind_dropout: bool = True # Set to True during training to apply adv_ind dropout in model transforms
+    adv_ind_dropout: bool = True  # Set to True during training to apply adv_ind dropout in model transforms
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -381,7 +381,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
                             "observation/state": "state",
                             "actions": "actions",
                             "prompt": "prompt",
-                            "adv_ind": "adv_ind", 
+                            "adv_ind": "adv_ind",
                             # add adv_ind and filter out value, reward, epsilon, adv produced in pistar data processing
                         }
                     )
@@ -440,7 +440,7 @@ class LeRobotPiperDataConfig(DataConfigFactory):
     """
 
     extra_delta_transform: bool = False
-    adv_ind_dropout: bool = True # Set to True during training to apply adv_ind dropout in model transforms
+    adv_ind_dropout: bool = True  # Set to True during training to apply adv_ind dropout in model transforms
     action_sequence_keys: Sequence[str] = ("action",)
 
     @override
@@ -459,8 +459,8 @@ class LeRobotPiperDataConfig(DataConfigFactory):
                     _transforms.RepackTransform(
                         {
                             "images": {
-                                    "cam_high": "observation.images.cam_head",
-                                    "cam_wrist": "observation.images.cam_wrist",
+                                "cam_high": "observation.images.cam_head",
+                                "cam_wrist": "observation.images.cam_wrist",
                             },
                             "state": "observation.state",
                             "actions": "action",
@@ -475,13 +475,13 @@ class LeRobotPiperDataConfig(DataConfigFactory):
                     _transforms.RepackTransform(
                         {
                             "images": {
-                                    "cam_high": "observation.images.cam_head",
-                                    "cam_wrist": "observation.images.cam_wrist",
+                                "cam_high": "observation.images.cam_head",
+                                "cam_wrist": "observation.images.cam_wrist",
                             },
                             "state": "observation.state",
                             "actions": "action",
                             "prompt": "prompt",
-                            "adv_ind": "adv_ind", 
+                            "adv_ind": "adv_ind",
                             # add adv_ind and filter out value, reward, epsilon, adv produced in pistar data processing
                         }
                     )
@@ -1016,7 +1016,7 @@ _CONFIGS = [
             action_horizon=50,
         ),
         data=LeRobotPiperDataConfig(
-            repo_id="piperx/piperx_black_plug_demo",
+            repo_id="piperx_black_plug_0825_v3",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
         ),
@@ -1108,7 +1108,7 @@ _CONFIGS = [
             repo_id="ybpy/libero_pistar",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
-            adv_ind_dropout=False, 
+            adv_ind_dropout=False,
             # Disable adv_ind dropout during inference
         ),
         batch_size=256,
@@ -1354,9 +1354,7 @@ _CONFIGS = [
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params"
-        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=10_000,
         keep_period=1_000,
@@ -1385,9 +1383,7 @@ _CONFIGS = [
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params"
-        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=10_000,
         keep_period=1_000,
@@ -1415,9 +1411,7 @@ _CONFIGS = [
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params"
-        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=10_000,
         keep_period=1_000,
@@ -1446,9 +1440,7 @@ _CONFIGS = [
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params"
-        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=10_000,
         keep_period=1_000,
