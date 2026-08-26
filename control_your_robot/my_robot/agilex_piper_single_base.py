@@ -41,14 +41,23 @@ condition = {
 
 
 class PiperSingle(Robot):
-    def __init__(self, condition=condition, move_check=True, start_episode=0):
+    def __init__(
+        self,
+        condition=condition,
+        move_check=True,
+        start_episode=0,
+        arm_can="can_left_slave",
+        use_mit_mode=False,
+    ):
         super().__init__(condition=condition, move_check=move_check, start_episode=start_episode)
 
         self.condition = condition
+        self.arm_can = arm_can
+        self.use_mit_mode = bool(use_mit_mode)
         self.camera_serials = get_piper_camera_serials("single")
         self.controllers = {
             "arm":{
-                "left_arm": PiperController("left_arm"),
+                "left_arm": PiperController("left_arm", use_mit_mode=self.use_mit_mode),
             },
         }
         self.sensors = {
@@ -65,7 +74,7 @@ class PiperSingle(Robot):
     def set_up(self):
         super().set_up()
 
-        self.controllers["arm"]["left_arm"].set_up("can_left_slave")
+        self.controllers["arm"]["left_arm"].set_up(self.arm_can)
         self.sensors["image"]["cam_head"].set_up(self.camera_serials["head"])
         self.sensors["image"]["cam_wrist"].set_up(self.camera_serials["wrist"])
 

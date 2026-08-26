@@ -138,6 +138,7 @@ class ModelTransformFactory(GroupFactory):
                             discrete_state_input=model_config.discrete_state_input,
                             adv_ind_input=model_config.pistar,
                             adv_ind_dropout=self.adv_ind_dropout,
+                            adv_guidance_input=model_config.pistar and not self.adv_ind_dropout,
                         ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],

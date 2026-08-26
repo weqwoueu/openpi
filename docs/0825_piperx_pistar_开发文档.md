@@ -2,8 +2,8 @@
 
 > 日期：2026-08-25  
 > 分支：`liuzijian/pistar-piperx`  
-> 当前 HEAD：`926680c`  
-> 当前阶段：**专家示教采集中；PiperX 普通 pi0.5 SFT 适配已完成，尚未生成最终 norm stats，尚未启动正式训练**  
+> 当前 HEAD：`3a71ee8`
+> 当前阶段：**107 条专家示教和 norm stats 已完成，PiperX 普通 pi0.5 SFT 正在训练；SFT/PiStar 共用的 WebSocket 推理入口已经接通**
 > 任务：`put the black plug into the two-hole socket`
 
 ## 1. 当前结论
@@ -18,9 +18,9 @@
 6. PiperX 数据到 pi0.5 的 policy transform、data config 和首轮 SFT config 已接好；
 7. 配置导入、命令入口、数据结构和聚焦单元测试已经通过。
 
-因此，**完成本轮专家数据采集、上传和质检后，可以计算 norm stats 并启动第一版 SFT**。
+当前第一版 SFT 已经开始训练。checkpoint 保存完成后，可使用本文第 10.4 节的 WebSocket 入口做真机基线推理。
 
-目前还不能写成“完整 RECAP 已经跑通”。正式 SFT checkpoint、真机基线推理、DAgger、Value Model、Advantage 标注和 PiStar CFG 训练都还没有在本任务上完成。
+目前还不能写成“完整 RECAP 已经跑通”。完整 SFT checkpoint、真机基线推理、DAgger、Value Model、Advantage 标注和 PiStar CFG 训练都还没有在本任务上完成。
 
 这里的实现基于仓库现有 pi0.5/PiStar 代码，是 RECAP 风格的迭代流程，不应表述为已经复现官方 pi0.6 RECAP。
 
@@ -145,16 +145,20 @@ dataset action: 7D absolute
 
 当前 `extra_delta_transform=False`，所以训练时不会把前 6 个关节动作减去当前 state。部署端也不能再额外做一次 delta/absolute 转换。
 
-### 5.3 旧 v3 测试集边界
+### 5.3 最终 SFT 数据
 
-`/home/standard/下载/piperx_black_plug_demo_v3` 已经验证过 parquet、视频和 7 维曲线能够被读取，但它不是本轮最终训练数据。其元数据仍是：
+最终训练数据为 `piperx_black_plug_0825_v3`：
 
-- 1 个 episode；
-- `1280x720@10Hz`；
-- prompt 是白色插头任务；
-- 旧相机和旧采集设置。
+| 项目 | 数值 |
+|---|---:|
+| episodes | 107 |
+| frames | 66,358 |
+| videos | 214 |
+| fps | 30 |
+| 图像 | 两路 `640x480` AV1 |
+| state/action | 单臂 7D 绝对量 |
 
-它只能用于结构回归，不能用它的 norm stats 训练当前黑色插头任务。
+全局 `index` 为连续的 `0..66357`，每条 episode 的 parquet、两路视频和 metadata 长度一致。OpenPI 数据加载验证得到 `(B,32)` state、`(B,50,32)` action chunk 和两路有效图像输入。
 
 ## 6. 当前采集操作
 
@@ -187,7 +191,13 @@ one_arm_go_init.sh can_left_slave
 
 ## 7. 上传后的数据验收
 
-最终数据上传到训练服务器后，先检查数据，不要立即算 norm stats。
+最终数据已经上传到训练服务器：
+
+```text
+/mnt/kpfs_juice/liuzijian/data/lerobot/piperx_black_plug_0825_v3/piperx_black_plug_0825_v3
+```
+
+训练时的 `HF_LEROBOT_HOME` 按第 9 节设置。
 
 ### 7.1 元数据必须满足
 
@@ -216,7 +226,7 @@ cam_wrist.shape = [3, 480, 640]
 7. 随机抽查头部/腕部视频，没有长时间黑帧、冻结或相机串位；
 8. 任务成功标准一致，失败/误操作 episode 不混进专家成功集。
 
-只有这一批最终上传数据通过验收后，才生成正式 norm stats。
+本批最终上传数据已经通过上述验收。
 
 ## 8. PiperX SFT 适配
 
@@ -234,11 +244,12 @@ TrainConfig(
         action_horizon=50,
     ),
     data=LeRobotPiperDataConfig(
-        repo_id="piperx/piperx_black_plug_demo",
+        repo_id="piperx_black_plug_0825_v3",
         base_config=DataConfig(prompt_from_task=True),
         extra_delta_transform=False,
     ),
     batch_size=240,
+    num_workers=16,
     weight_loader=CheckpointWeightLoader(
         "gs://openpi-assets/checkpoints/pi05_base/params"
     ),
@@ -261,99 +272,114 @@ TrainConfig(
 
 ## 9. 训练服务器环境
 
-隔壁 `/home/standard/workspace/gitlab/openpi` 的现有训练环境已确认包含：
-
-```text
-Python 3.11.15
-JAX 0.5.3
-PyTorch 2.7.1+cu126
-Flax 0.10.2
-LeRobot commit 0cf864870cf29f4738d3ade893e6fd13fbd7cdb5
-```
-
-这些核心版本与当前分支的锁文件相符。用户提交并推送当前改动后，在训练服务器切换分支：
+新建训练窗口：
 
 ```bash
-cd /home/standard/workspace/gitlab/openpi
-git fetch <remote>
-git switch liuzijian/pistar-piperx
-git pull --ff-only
-git rev-parse --short HEAD
-
-source .venv/bin/activate
-uv sync --active --frozen
+tmux new -s piperx_sft
 ```
 
-本仓库的 `lerobot` 仍是 Git commit 依赖，不是受 Git 跟踪的 `third_party/` 目录。若训练机本地没有该 commit 的 uv/Git 缓存，`uv sync` 仍需要能访问 GitHub；网络失败时要使用已有 uv 缓存或正常的 Git 网络代理，而不是把整个 `third_party/` 提交进当前分支。
-
-注意：editable install 绑定具体源码路径。如果训练服务器使用另一个 checkout，只激活旧 `.venv` 不能保证导入新分支源码；切分支后必须执行一次 `uv sync --active --frozen`，再检查：
+进入窗口后执行：
 
 ```bash
-python -c "import openpi; print(openpi.__file__)"
-python scripts/train.py --help | rg pi05_piperx_plug_sft
-python scripts/compute_norm_stats.py --help
+cd /mnt/kpfs_juice/liuzijian/code/openpi
+
+unset VIRTUAL_ENV PYTHONPATH
+
+export WANDB_ENTITY=franciscoyllydekirat870-lll
+export WANDB_PROJECT=openpi
+export WANDB_DIR=/mnt/kpfs_juice/liuzijian/cache/wandb
+export HF_LEROBOT_HOME=/mnt/kpfs_juice/liuzijian/data/lerobot/piperx_black_plug_0825_v3
+export HF_HOME=/mnt/kpfs_juice/liuzijian/cache/huggingface
+export OPENPI_DATA_HOME=/mnt/kpfs_juice/liuzijian/cache/openpi
+export UV_CACHE_DIR=/mnt/kpfs_juice/liuzijian/cache/uv
 ```
 
-`my_env.sh` 会按当前目录设置 `UV_CACHE_DIR`、`HF_LEROBOT_HOME` 和 `OPENPI_DATA_HOME`。数据和 checkpoint 路径由使用者管理时，应先确认这些变量，不要盲目 source 后覆盖训练机原有路径：
+离开 tmux：`Ctrl+B` 后按 `D`。重新进入：
 
 ```bash
-printf '%s\n' "$UV_CACHE_DIR" "$HF_LEROBOT_HOME" "$OPENPI_DATA_HOME"
+tmux attach -t piperx_sft
 ```
-
-当前流程不需要执行 `git submodule update --init --recursive`。
 
 ## 10. Norm Stats 与正式训练
 
-### 10.1 数据地址
+### 10.1 计算 norm stats
 
-在计算 norm stats 前，先确保 `pi05_piperx_plug_sft` 中的 `repo_id` 与最终上传数据一致。`train.py` 可以覆盖部分 config 字段，但当前 `compute_norm_stats.py` 的 CLI 只接收 `config_name` 和 `max_frames`，所以不要假设它会自动识别任意数据路径。
-
-### 10.2 计算 norm stats
-
-在 PiStar 根目录执行：
+第 9 节环境变量设置完成后，在 OpenPI 根目录执行完整数据归一化：
 
 ```bash
-python scripts/compute_norm_stats.py \
+CUDA_VISIBLE_DEVICES=0 \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --no-sync scripts/compute_norm_stats.py \
   --config-name pi05_piperx_plug_sft
 ```
 
-默认输出到：
-
-```text
-./assets/pi05_piperx_plug_sft/<repo_id>/norm_stats.json
-```
-
-验收 norm stats：
-
-- `state` 和 `actions` 都有统计量；
-- 统计基于原始 7 维数据，不是人为转换后的 delta；
-- 数值全部 finite；
-- 没有维度长期异常为 0；
-- 使用的是本轮最终上传数据，而不是旧 v3。
-
-### 10.3 启动训练
-
-路径由使用者指定，命令模板如下：
+### 10.2 首次启动 SFT
 
 ```bash
-XLA_PYTHON_CLIENT_PREALLOCATE=true \
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
-python scripts/train.py pi05_piperx_plug_sft \
-  --exp-name=<EXP_NAME> \
-  --assets-base-dir=<ASSETS_BASE_DIR> \
-  --checkpoint-base-dir=<CHECKPOINT_BASE_DIR> \
-  --overwrite
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.85 \
+uv run --no-sync scripts/train.py pi05_piperx_plug_sft \
+  --exp-name piperx_black_plug_0825_v3_sft_run_001 \
+  --overwrite \
+  --batch-size 240 \
+  --num-workers 16 \
+  --num-train-steps 30000 \
+  --save-interval 10000 \
+  --keep-period 10000 \
+  --fsdp-devices 1 \
+  --wandb-enabled \
+  --assets-base-dir /mnt/kpfs_juice/liuzijian/code/openpi/assets \
+  --checkpoint-base-dir /mnt/kpfs_juice/liuzijian/checkpoints/openpi
 ```
 
-如果 `batch_size=240` 在目标 GPU 拓扑上不合适，再通过 config/CLI 调整；不要仅因为隔壁任务能跑就假设显存一定相同。
-
-中断后恢复时，把 `--overwrite` 换成：
+### 10.3 断点续训
 
 ```bash
---resume
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.85 \
+uv run --no-sync scripts/train.py pi05_piperx_plug_sft \
+  --exp-name piperx_black_plug_0825_v3_sft_run_001 \
+  --resume \
+  --batch-size 240 \
+  --num-workers 16 \
+  --num-train-steps 30000 \
+  --save-interval 10000 \
+  --keep-period 10000 \
+  --fsdp-devices 1 \
+  --wandb-enabled \
+  --assets-base-dir /mnt/kpfs_juice/liuzijian/code/openpi/assets \
+  --checkpoint-base-dir /mnt/kpfs_juice/liuzijian/checkpoints/openpi
 ```
 
-训练真正启动的判据是日志出现 `Step 0` 及 finite loss。只出现 `Initialized train state` 只证明模型和优化器初始化完成，不能算已经开始有效训练。
+首次启动使用 `--overwrite`；断点续训只使用 `--resume`，二者不能同时出现。训练真正启动的判据是日志出现 `Step 0` 及 finite loss。
+
+### 10.4 SFT WebSocket 推理
+
+服务端和客户端的可修改设置均集中在脚本顶部。服务端主要修改 `REPO_ROOT`、具体 step 的 `CHECKPOINT_DIR`、`TRAIN_CONFIG` 和监听端口；`CHECKPOINT_DIR` 必须直接包含 `params/` 和对应 norm stats，不能填写 run 根目录或 `params/` 子目录。
+
+训练/推理服务器执行：
+
+```bash
+cd /mnt/kpfs_juice/liuzijian/code/openpi
+bash control_your_robot/scripts/piperx/run_server.sh
+```
+
+部署机先完成 CAN 和初始姿态，再运行客户端：
+
+```bash
+cd <PISTAR_ROOT>/control_your_robot
+bash scripts/piperx/2_arm_can_activate.sh
+bash scripts/piperx/2_arm_go_init.sh
+bash scripts/piperx/run_client.sh
+```
+
+`run_client.sh` 当前只做真机推理，不创建或写入数据集。默认设置为 `CONTROL_FREQ=30`、`CHUNK_SIZE=10`、`NUM_EPISODES=1`；`NUM_EPISODES=-1` 表示无限重复，任意阶段按 `Ctrl+C` 都作为正常退出，并关闭相机、WebSocket 和 CAN 连接。
+
+这里的 `30Hz` 是每个已返回 action chunk 内的目标发送节拍。客户端每执行 10 步会同步请求下一个 chunk，因此两个 chunk 之间仍会包含网络和模型推理耗时，不应描述为严格无间隙的全程 30Hz 控制。
+
+普通 SFT 保持 `ADV_IND=""`、`ADV_GUIDANCE_BETA=""`。未来 PiStar 推理使用同一套入口，但需要换成对应的 PiStar infer config/checkpoint，并设置 `ADV_IND="positive"`；PiStar 的独立采集入口后续另行实现。
 
 ## 11. 当前代码改动摘要
 
@@ -361,48 +387,37 @@ python scripts/train.py pi05_piperx_plug_sft \
 |---|---|
 | `src/openpi/policies/piper_policy.py` | 严格检查 7D state/action；支持 HWC/CHW；映射双相机；补空的第三相机和 mask；输出前 7D |
 | `src/openpi/training/config.py` | 新增 `LeRobotPiperDataConfig` 数据映射和唯一的 `pi05_piperx_plug_sft` |
-| `src/openpi/training/data_loader.py` | 恢复标准 `repo_id -> LeRobotDataset` 加载路径；移除当前不存在的本地目录分支和 HF monkey transform |
+| `src/openpi/training/data_loader.py` | 使用标准 `repo_id -> LeRobotDataset` 加载路径 |
 | `src/openpi/models/pi0.py` | 普通 pi0.5 loss 返回 `(B,H)` 的逐时间步 MSE，保留 PiStar 加权损失接口 |
+| `control_your_robot/scripts/serve_piper_single_pi05star_websocket.py` | 从根 OpenPI 加载 checkpoint，发布 SFT/PiStar metadata 和可选 guidance 参数 |
+| `control_your_robot/example/deploy/piper_single_on_PI0_websocket.py` | PiperX 新输入合同、MIT 绝对 7D 动作、chunk 内 30Hz 与正常退出清理 |
+| `control_your_robot/scripts/piperx/run_server.sh` | 服务端人工配置和启动入口 |
+| `control_your_robot/scripts/piperx/run_client.sh` | 无采集功能的真机推理入口 |
 | `scripts/train.py` | 在 train step 对模型 loss 做总 mean |
-| `src/openpi/shared/console.py` | 补齐 value/label/weight loader 依赖的文本日志辅助函数 |
+| `src/openpi/shared/console.py` | 提供 value/label/weight loader 使用的文本日志辅助函数 |
 | `src/openpi/policies/piper_policy_test.py` | 覆盖图像映射、绝对 action、shape/finite 校验和 7D 输出 |
 | `src/openpi/training/piperx_config_contract_test.py` | 锁定 PiperX SFT 配置合同 |
 
-本文档生成时，上述训练适配仍在工作树中，尚未由助手提交；提交和推送由用户处理。`third_party/aloha` 的已有状态与本轮无关，未修改。
+上述 PiperX 采集和训练适配已经提交到 `liuzijian/pistar-piperx` 分支。
 
 ## 12. 已完成验证
 
-当前已完成的离线验证：
+当前已完成：
 
-1. `pi05_piperx_plug_sft` 可被 config registry 找到；
-2. `scripts/train.py --help` 能正常加载并显示新配置；
-3. `scripts/compute_norm_stats.py --help` 能正常加载；
-4. 新增 Piper policy/config 聚焦测试：`10 passed`；
-5. 联合现有 data loader 测试的聚焦回归：`15 passed`；
-6. 旧 v3 测试数据能生成 `(B,32)` state 和 `(B,50,32)` action chunk；
-7. 两路真实图像映射到 pi0.5，第三路图像 mask 为 false；
-8. 普通 pi0.5 dummy loss 为 finite，shape 为 `(B,H)`；
-9. 相关新文件通过 Ruff；
-10. `git diff --check` 通过。
+1. 107 条最终专家数据完成并上传；
+2. 107 个 parquet、214 个视频和 66,358 帧通过一致性验证；
+3. `pi05_piperx_plug_sft` 已指向最终 repo ID；
+4. OpenPI loader 已生成 `(B,32)` state、`(B,50,32)` action 和有效图像 batch；
+5. norm stats 已生成，四卡 SFT 正在训练。
 
-上述验证使用隔壁已经训练过的 OpenPI `.venv` 配合当前 PiStar 源码完成。当前 PiStar checkout 自身没有独立 `.venv`，所以这不等于训练服务器切分支后的最终环境验收。
-
-尚未完成：
-
-- 最终上传专家全集质检；
-- 最终数据 norm stats；
-- GPU 真实 batch；
-- `Step 0` 和训练 loss；
-- SFT checkpoint；
-- 策略服务和真机推理；
-- DAgger、Value、Advantage、PiStar 训练。
+尚未完成：完整 SFT checkpoint、真机基线、DAgger、Value、Advantage 和 PiStar 训练。
 
 ## 13. RECAP 后续各阶段状态
 
 | 阶段 | 当前状态 | 进入下一阶段前必须完成 |
 |---|---|---|
-| 专家示教 | 进行中 | 上传最终数据并通过第 7 节质检 |
-| 普通 pi0.5 SFT | 代码适配完成 | norm stats、真实 Step 0、训练完成、checkpoint 推理 |
+| 专家示教 | 已完成并上传 | 保留最终 v3 数据不再原地修改 |
+| 普通 pi0.5 SFT | norm stats 已完成，训练进行中 | 训练完成、checkpoint 推理 |
 | SFT 真机基线 | 未开始 | 固定任务布置和评测标准，记录成功/失败/干预 |
 | DAgger | 有旧入口，PiperX 当前链路未重新验收 | 统一模型 config、双相机、7D 绝对 action 和采集字段 |
 | Value Model | 有实现代码，当前入口不可直接运行 | 修复本地数据加载合同、模型权重路径并完成目标任务训练 |
@@ -470,20 +485,15 @@ A_t = sum(reward_label[t:t+N]) + V(t+N) - V(t)
 
 按以下 gate 顺序推进：
 
-1. 采完本轮黑色插头专家数据；
-2. 上传后检查 metadata、两路视频、7D 数值、时间轴和任务文本；
-3. 确认训练 config 的 `repo_id` 指向最终数据；
-4. 计算正式 norm stats；
-5. 在训练服务器完成分支/环境验收；
-6. 启动 `pi05_piperx_plug_sft`，确认 `Step 0` 和 finite loss；
-7. 训练出第一版权重并做离线/真机推理；
-8. 统一并验收 PiperX DAgger；
-9. 用 rollout/接管数据训练目标任务 Value Model；
-10. 在数据副本上生成 advantage 标签；
-11. 新增并验证 PiperX PiStar train/infer config；
-12. 固定评测方案，对 SFT 与 PiStar 做同条件对照。
+1. 完成当前 `pi05_piperx_plug_sft` 训练；
+2. 使用统一 WebSocket 入口完成第一版权重真机推理；
+3. 另行实现并验收 PiperX rollout/DAgger 采集；
+4. 用 rollout/接管数据训练目标任务 Value Model；
+5. 在数据副本上生成 advantage 标签；
+6. 新增并验证 PiperX PiStar train/infer config；
+7. 固定评测方案，对 SFT 与 PiStar 做同条件对照。
 
-当前最直接的工作边界是第 1 到第 6 项：**先把高质量专家数据和第一版普通 SFT 跑稳，再进入 DAgger/Value/RECAP。**
+当前最直接的工作边界是第 1 到第 3 项：**先把第一版普通 SFT 跑稳，再进入 DAgger/Value/RECAP。**
 
 ## 15. 关键文件索引
 
@@ -501,5 +511,7 @@ A_t = sum(reward_label[t:t+N]) + V(t+N) - V(t)
 | 数据加载 | `src/openpi/training/data_loader.py` |
 | Norm stats | `scripts/compute_norm_stats.py` |
 | 训练入口 | `scripts/train.py` |
+| 推理服务端 | `control_your_robot/scripts/piperx/run_server.sh` |
+| 真机推理客户端 | `control_your_robot/scripts/piperx/run_client.sh` |
 | Value 训练 | `scripts/train_value.py` |
 | Advantage 标注 | `scripts/label_advantage_from_vlm.py` |
