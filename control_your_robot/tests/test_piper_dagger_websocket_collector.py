@@ -534,6 +534,8 @@ class FakeSdk:
             self.status.teach_status = 0x01
         elif args[2] == 0x02:
             self.status.teach_status = 0x02
+        elif args[2] == 0x00:
+            self.status.teach_status = 0x00
 
     def MotionCtrl_2(self, _ctrl_mode, _move_mode, _speed, mode_flag):
         self.mode_flags.append(mode_flag)
@@ -560,6 +562,9 @@ class FakeSdk:
         pass
 
     def GripperCtrl(self, *_args):
+        pass
+
+    def EnableArm(self, _motor_num):
         pass
 
 
@@ -647,6 +652,7 @@ def test_piper_dagger_policy_send_uses_mit_for_follower(monkeypatch):
     ]
     assert master.controller.motion_ctrl_1_calls == [
         (0x00, 0x00, 0x02),
+        (0x00, 0x00, 0x00),
         (0x00, 0x00, 0x01),
     ]
     assert master.controller.teaching_param_calls == [
@@ -665,6 +671,17 @@ def test_piper_dagger_policy_send_uses_mit_for_follower(monkeypatch):
         0x00,
     )
     assert master.controller.motion_ctrl_1_calls[-1] == (0x00, 0x00, 0x01)
+
+    robot.reassert_follower_hold = lambda: None
+    robot.get_master_input_state = robot.get_master_state
+    robot.disable_master_drag_mode()
+    robot.enable_master_drag_mode()
+    assert master.controller.motion_ctrl_1_calls[-4:] == [
+        (0x00, 0x00, 0x02),
+        (0x00, 0x00, 0x00),
+        (0x00, 0x00, 0x00),
+        (0x00, 0x00, 0x01),
+    ]
 
     can_bus = FakeCanBus()
 

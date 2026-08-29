@@ -533,6 +533,10 @@ class PiperDAgger(Robot):
             # Cancel a previously accepted but incomplete teach-mode request.
             master.MotionCtrl_1(0x00, 0x00, 0x02)
             time.sleep(0.1)
+        # 0x02 is an exit request, not the neutral state. Clear it before every
+        # new 0xFA transition so repeated takeovers can enter drag mode again.
+        master.MotionCtrl_1(0x00, 0x00, 0x00)
+        time.sleep(0.1)
 
         # Stop the master's last autonomous MOVE_J at its live feedback pose.
         # A still-pending policy target can keep ctrl_mode in CAN control even
@@ -611,6 +615,10 @@ class PiperDAgger(Robot):
         if master is None:
             raise RuntimeError("Master controller is not initialized")
 
+        status = master.GetArmStatus().arm_status
+        if int(status.teach_status) == 0x02:
+            master.MotionCtrl_1(0x00, 0x00, 0x00)
+            time.sleep(0.1)
         master.MasterSlaveConfig(
             MASTER_ROLE,
             FEEDBACK_OFFSET,
@@ -638,6 +646,8 @@ class PiperDAgger(Robot):
         # the master does not return to a stale pre-takeover command.
         master.MotionCtrl_1(0x00, 0x00, 0x02)  # Exit drag teaching
         time.sleep(0.15)
+        master.MotionCtrl_1(0x00, 0x00, 0x00)  # Clear the exit request
+        time.sleep(0.1)
         master.MasterSlaveConfig(
             FOLLOWER_ROLE,
             FEEDBACK_OFFSET,
