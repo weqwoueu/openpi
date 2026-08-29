@@ -507,15 +507,13 @@ class PiperDAgger(Robot):
         master.MotionCtrl_1(0x00, 0x00, 0x00)  # Clear all modes
         time.sleep(0.1)
 
-        # Step 2: Configure as FOLLOWER first (clean state transition)
-        master.MasterSlaveConfig(FOLLOWER_ROLE, FEEDBACK_OFFSET, CTRL_OFFSET, LINKAGE_OFFSET)
-        time.sleep(0.2)
-
-        # Step 3: Configure as MASTER role (0xFA) for true zero-force dragging
+        # Switching directly to the teaching-input role releases the master arm.
+        # Do not enter MotionCtrl_1 teaching-record mode here: the SDK's master
+        # setup and the working PiperX reference only require MasterSlaveConfig.
         master.MasterSlaveConfig(MASTER_ROLE, FEEDBACK_OFFSET, CTRL_OFFSET, LINKAGE_OFFSET)
-        time.sleep(0.2)
+        time.sleep(0.5)
 
-        # Step 4: CRITICAL - Reduce drag teaching friction (lower = lighter)
+        # Reduce teaching-pendant friction (lower = lighter).
         try:
             if hasattr(master, "GripperTeachingPendantParamConfig"):
                 master.GripperTeachingPendantParamConfig(
@@ -527,14 +525,8 @@ class PiperDAgger(Robot):
         except Exception as e:
             print(f"[warn] failed to set teaching friction: {e}")
 
-        # Step 5: Enter drag teaching mode
-        # MotionCtrl_1(emergency_stop, track_ctrl, grag_teach_ctrl)
-        # grag_teach_ctrl: 0x01 = Start teaching record (enter drag teaching mode)
-        master.MotionCtrl_1(0x00, 0x00, 0x01)  # Enable drag teaching mode
-        time.sleep(0.2)
-
         self.reset_intervention_tracking()
-        print("[mode] master arm drag teaching mode enabled - FREE TO DRAG")
+        print("[mode] master arm switched to teaching-input role (0xFA) - FREE TO DRAG")
 
     def disable_master_drag_mode(self):
         """Disable intervention mode: master arm becomes software-controllable follower"""

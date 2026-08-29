@@ -423,9 +423,21 @@ def test_teleop_mapping_starts_at_follower_and_preserves_master_delta():
 class FakeSdk:
     def __init__(self):
         self.mode_flags = []
+        self.motion_ctrl_1_calls = []
+        self.master_slave_calls = []
+        self.teaching_param_calls = []
+
+    def MotionCtrl_1(self, *args):
+        self.motion_ctrl_1_calls.append(args)
 
     def MotionCtrl_2(self, _ctrl_mode, _move_mode, _speed, mode_flag):
         self.mode_flags.append(mode_flag)
+
+    def MasterSlaveConfig(self, *args):
+        self.master_slave_calls.append(args)
+
+    def GripperTeachingPendantParamConfig(self, **kwargs):
+        self.teaching_param_calls.append(kwargs)
 
     def JointCtrl(self, *_joints):
         pass
@@ -454,7 +466,7 @@ class FakeControllerWrapper:
         self.controller = FakeSdk()
 
 
-def test_piper_dagger_policy_send_uses_mit_for_follower():
+def test_piper_dagger_policy_send_uses_mit_for_follower(monkeypatch):
     class StubRobot:
         pass
 
@@ -501,6 +513,25 @@ def test_piper_dagger_policy_send_uses_mit_for_follower():
         sent,
         np.concatenate([np.arange(6, dtype=np.float32) / 10, [0.5]]),
     )
+
+    monkeypatch.setattr(piper_module.time, "sleep", lambda _seconds: None)
+    robot.reset_intervention_tracking = lambda: None
+    robot.enable_master_drag_mode()
+
+    assert master.controller.master_slave_calls == [
+        (piper_module.MASTER_ROLE, 0x00, 0x00, 0x00)
+    ]
+    assert master.controller.motion_ctrl_1_calls == [
+        (0x00, 0x00, 0x02),
+        (0x00, 0x00, 0x00),
+    ]
+    assert master.controller.teaching_param_calls == [
+        {
+            "teaching_range_per": 100,
+            "max_range_config": 70,
+            "teaching_friction": 1,
+        }
+    ]
 
     can_bus = FakeCanBus()
 

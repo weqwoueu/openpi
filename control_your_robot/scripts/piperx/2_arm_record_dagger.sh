@@ -33,7 +33,7 @@ TARGET_INTERVENTION_FAILURE=-1
 
 RESET_SETTLE_SECONDS=2.0
 ALIGNMENT_TIMEOUT=2.0
-FEEDBACK_FALLBACK=false
+FEEDBACK_FALLBACK=true
 
 # Ordinary pi0.5 SFT: leave empty. PiStar inference: for example positive.
 # This affects inference only. Saved raw data always uses adv_ind=none.
