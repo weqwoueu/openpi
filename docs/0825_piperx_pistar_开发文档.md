@@ -379,7 +379,40 @@ bash scripts/piperx/run_client.sh
 
 这里的 `30Hz` 是每个已返回 action chunk 内的目标发送节拍。客户端每执行 10 步会同步请求下一个 chunk，因此两个 chunk 之间仍会包含网络和模型推理耗时，不应描述为严格无间隙的全程 30Hz 控制。
 
-普通 SFT 保持 `ADV_IND=""`、`ADV_GUIDANCE_BETA=""`。未来 PiStar 推理使用同一套入口，但需要换成对应的 PiStar infer config/checkpoint，并设置 `ADV_IND="positive"`；PiStar 的独立采集入口后续另行实现。
+普通 SFT 保持 `ADV_IND=""`、`ADV_GUIDANCE_BETA=""`。未来 PiStar 推理使用同一套入口，但需要换成对应的 PiStar infer config/checkpoint，并设置 `ADV_IND="positive"`。DAgger 使用下面的独立客户端，推理条件和原始数据标签互不混用。
+
+### 10.5 WebSocket DAgger 采集
+
+先在训练/推理服务器启动与当前 checkpoint 对应的服务：
+
+```bash
+cd /mnt/kpfs_juice/liuzijian/code/openpi
+bash control_your_robot/scripts/piperx/run_server.sh
+```
+
+部署机修改 `2_arm_record_dagger.sh` 顶部的数据地址、服务地址和 CAN 名称，然后执行：
+
+```bash
+cd <PISTAR_ROOT>/control_your_robot
+bash scripts/piperx/2_arm_can_activate.sh
+bash scripts/piperx/2_arm_go_init.sh
+bash scripts/piperx/2_arm_record_dagger.sh
+```
+
+状态机固定为：
+
+```text
+READY --Enter--> AUTONOMOUS --Space--> INTERVENTION --Enter--> LABEL
+LABEL --Right--> success --Enter--> save
+LABEL --Left----> failure --Enter--> save
+save --Enter--> next AUTONOMOUS
+```
+
+单个 episode 内 `Space` 只允许从策略切到专家一次，进入专家后不能切回策略。切换时清空剩余 action chunk、递增 generation 并丢弃迟到的旧推理结果；模式切换和主从对齐期间不采帧。自主阶段同一条策略 action 同步发送给主臂和从臂；专家阶段主臂保持拖动示教，从臂固定使用 MIT `0xAD`，60Hz 遥操控制并以 30Hz 落盘。
+
+每帧保存实际下发的 7D 绝对 action。策略帧 `intervention=0`，接管完成后的专家帧 `intervention=1`。Right/Left 只决定 episode 的 success/failure 及其 value/reward 标签；原始 rollout/DAgger 数据无论成功失败都写 `adv_ind=none`，最终 positive/negative advantage 由后续 Value/Advantage 流程生成。`Ctrl+C` 丢弃尚未保存的 episode；若已经开始保存，则完成本次保存后退出。
+
+默认 `MAX_STEPS=900`，即 30Hz 下单回合最多 30 秒，随后自动进入 LABEL；`NUM_EPISODES=-1` 仍表示可连续采无限多个回合。若把 `MAX_STEPS` 改为 `-1`，单回合的两路原始图像会一直驻留内存直到保存或丢弃，不适合无人看守运行。
 
 ## 11. 当前代码改动摘要
 
@@ -391,14 +424,17 @@ bash scripts/piperx/run_client.sh
 | `src/openpi/models/pi0.py` | 普通 pi0.5 loss 返回 `(B,H)` 的逐时间步 MSE，保留 PiStar 加权损失接口 |
 | `control_your_robot/scripts/serve_piper_single_pi05star_websocket.py` | 从根 OpenPI 加载 checkpoint，发布 SFT/PiStar metadata 和可选 guidance 参数 |
 | `control_your_robot/example/deploy/piper_single_on_PI0_websocket.py` | PiperX 新输入合同、MIT 绝对 7D 动作、chunk 内 30Hz 与正常退出清理 |
+| `control_your_robot/example/collect/collect_lerobot_dagger_websocket.py` | WebSocket rollout、单向专家接管、success/failure 标注和 LeRobot 写入 |
+| `control_your_robot/my_robot/piper_dagger.py` | 主从 CAN 参数化、自主双臂同步、从臂 MIT 下发和实际 action 返回 |
 | `control_your_robot/scripts/piperx/run_server.sh` | 服务端人工配置和启动入口 |
 | `control_your_robot/scripts/piperx/run_client.sh` | 无采集功能的真机推理入口 |
+| `control_your_robot/scripts/piperx/2_arm_record_dagger.sh` | DAgger 数据地址、服务地址、频率和遥操滤波参数入口 |
 | `scripts/train.py` | 在 train step 对模型 loss 做总 mean |
 | `src/openpi/shared/console.py` | 提供 value/label/weight loader 使用的文本日志辅助函数 |
 | `src/openpi/policies/piper_policy_test.py` | 覆盖图像映射、绝对 action、shape/finite 校验和 7D 输出 |
 | `src/openpi/training/piperx_config_contract_test.py` | 锁定 PiperX SFT 配置合同 |
 
-上述 PiperX 采集和训练适配已经提交到 `liuzijian/pistar-piperx` 分支。
+上述内容位于 `liuzijian/pistar-piperx` 工作树；提交和推送由仓库维护者统一完成。
 
 ## 12. 已完成验证
 
@@ -408,9 +444,10 @@ bash scripts/piperx/run_client.sh
 2. 107 个 parquet、214 个视频和 66,358 帧通过一致性验证；
 3. `pi05_piperx_plug_sft` 已指向最终 repo ID；
 4. OpenPI loader 已生成 `(B,32)` state、`(B,50,32)` action 和有效图像 batch；
-5. norm stats 已生成，四卡 SFT 正在训练。
+5. norm stats 已生成，四卡 SFT 正在训练；
+6. DAgger 键盘、单向状态机、generation、MIT 和实际 action 语义通过离线测试；`control_your_robot/tests` 当前为 43 passed。
 
-尚未完成：完整 SFT checkpoint、真机基线、DAgger、Value、Advantage 和 PiStar 训练。
+尚未完成：完整 SFT checkpoint、真机基线、DAgger 真机首轮验收、Value、Advantage 和 PiStar 训练。
 
 ## 13. RECAP 后续各阶段状态
 
@@ -419,7 +456,7 @@ bash scripts/piperx/run_client.sh
 | 专家示教 | 已完成并上传 | 保留最终 v3 数据不再原地修改 |
 | 普通 pi0.5 SFT | norm stats 已完成，训练进行中 | 训练完成、checkpoint 推理 |
 | SFT 真机基线 | 未开始 | 固定任务布置和评测标准，记录成功/失败/干预 |
-| DAgger | 有旧入口，PiperX 当前链路未重新验收 | 统一模型 config、双相机、7D 绝对 action 和采集字段 |
+| DAgger | WebSocket 采集入口和离线测试已完成，尚未真机首轮验收 | 用 SFT checkpoint 跑首轮，检查视频、action/state、intervention 和 success/failure 标签 |
 | Value Model | 有实现代码，当前入口不可直接运行 | 修复本地数据加载合同、模型权重路径并完成目标任务训练 |
 | Advantage 标注 | 有脚本，当前入口不可直接运行 | 修复本地数据加载合同；只在派生副本上写标签 |
 | PiStar/CFG | 有模型分支，尚无 PiperX 任务配置 | 建立 PiperX PiStar config，确保每条样本都有有效 `adv_ind`，接通 unconditional guidance 输入 |
@@ -427,7 +464,7 @@ bash scripts/piperx/run_client.sh
 
 ### 13.1 DAgger
 
-下一步应先部署普通 SFT checkpoint，采集模型 rollout 和专家 pilot 接管：
+普通 SFT checkpoint 部署后，使用 `2_arm_record_dagger.sh` 采集模型 rollout 和专家 pilot 接管：
 
 ```text
 policy action -> 正常执行并记录 intervention=0
@@ -435,18 +472,17 @@ expert pilot 接管 -> 执行专家 action 并记录 intervention=1
 episode 结束 -> 保存真实成功/失败结果
 ```
 
-当前旧 DAgger 代码包含 vendored OpenPI 和旧 config 约定，不能仅修改 checkpoint 路径就宣称已经可用。要先统一它与根目录的 PiperX policy/data contract。
+新入口直接连接根 OpenPI 的 WebSocket 服务，不再使用旧 vendored `PI0_SINGLE`。模型请求使用当前 `state + cam_high + cam_wrist + prompt` 合同，输出取前 7 维绝对 action。网络推理和 CAN 控制解耦，action chunk 不足时重复最近一次真实命令，并按真实执行时间轴继续采样。
 
-当前具体阻塞包括：
+首轮真机验收后检查：
 
-- 默认 checkpoint、config、repo 和任务仍是旧 white-plug 版本；
-- rollout 循环仍按 `10Hz` 执行动作，而当前专家数据是 `30Hz`；
-- 模型 horizon 为 50，但旧逻辑只执行前 10 步，若继续按 10Hz 会把训练时序放慢约 3 倍；
-- DAgger 使用 `control_your_robot` 内的 vendored OpenPI，其中没有 `pi05_piperx_plug_sft`；
-- vendored inference 仍使用旧的 `observation/state`、`image`、`wrist_image` 键和错误的动作切片，与根目录当前 PiperX contract 不一致；
-- `scripts/merge_datasets.py` 仍硬编码旧 `image/wrist_image/state/actions` 列，不能直接合并当前 `observation.images.cam_* / observation.state / action` 数据。
+- 数据集包含两个相机的 `videos/` 文件，视频帧数与 parquet 一致；
+- `observation.state` 和 `action` 都是 7D，且运动维度存在合理变化；
+- Space 前 `intervention=0`，切换完成后 `intervention=1`，过渡帧没有写入；
+- 成功轨迹终帧 reward/value 与失败轨迹标签符合当前 collector 定义；
+- 全部原始帧 `adv_ind=none`。
 
-因此，第一版 SFT 训练完成后，下一项代码工作是统一 DAgger 推理、30Hz 执行和数据合并合同，而不是直接开始采 rollout。
+DAgger 数据保持为独立 repo，不与专家 v3 原地合并。后续训练是否混合专家和 rollout 数据，应由新的派生训练集或多数据源 loader 明确完成；旧 `scripts/merge_datasets.py` 仍不能直接用于当前字段。
 
 ### 13.2 Value Model
 
@@ -487,7 +523,7 @@ A_t = sum(reward_label[t:t+N]) + V(t+N) - V(t)
 
 1. 完成当前 `pi05_piperx_plug_sft` 训练；
 2. 使用统一 WebSocket 入口完成第一版权重真机推理；
-3. 另行实现并验收 PiperX rollout/DAgger 采集；
+3. 使用新入口完成 PiperX rollout/DAgger 真机首轮验收；
 4. 用 rollout/接管数据训练目标任务 Value Model；
 5. 在数据副本上生成 advantage 标签；
 6. 新增并验证 PiperX PiStar train/infer config；
@@ -513,5 +549,7 @@ A_t = sum(reward_label[t:t+N]) + V(t+N) - V(t)
 | 训练入口 | `scripts/train.py` |
 | 推理服务端 | `control_your_robot/scripts/piperx/run_server.sh` |
 | 真机推理客户端 | `control_your_robot/scripts/piperx/run_client.sh` |
+| DAgger 采集 | `control_your_robot/example/collect/collect_lerobot_dagger_websocket.py` |
+| DAgger 启动 | `control_your_robot/scripts/piperx/2_arm_record_dagger.sh` |
 | Value 训练 | `scripts/train_value.py` |
 | Advantage 标注 | `scripts/label_advantage_from_vlm.py` |

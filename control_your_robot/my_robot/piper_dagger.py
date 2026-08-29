@@ -46,13 +46,26 @@ condition = {
 
 
 class PiperDAgger(Robot):
-    def __init__(self, condition=condition, move_check=True, start_episode=0):
+    def __init__(
+        self,
+        condition=condition,
+        move_check=True,
+        start_episode=0,
+        master_can="can_left_mas",
+        follower_can="can_left_slave",
+        follower_use_mit_mode=True,
+    ):
         super().__init__(condition=condition, move_check=move_check, start_episode=start_episode)
 
+        self.master_can = master_can
+        self.follower_can = follower_can
+        self.follower_use_mit_mode = bool(follower_use_mit_mode)
         self.camera_serials = get_piper_camera_serials("dagger")
         self.controllers = {
             "arm": {
-                "left_arm": PiperController("left_arm"),   # follower
+                "left_arm": PiperController(
+                    "left_arm", use_mit_mode=self.follower_use_mit_mode
+                ),  # follower
                 "right_arm": PiperController("right_arm"),  # master
             },
         }
@@ -101,6 +114,23 @@ class PiperDAgger(Robot):
     def _gripper_to_cmd(gripper):
         return int(float(gripper) * 70 * 1000)
 
+    @staticmethod
+    def _raise_on_can_send_failure(controller, arm_name):
+        """Turn piper-sdk's logged send failures into exceptions for data collection."""
+        can_bus = controller.GetCanBus()
+        if getattr(can_bus, "_pistar_checked_send", False):
+            return
+        original_send = can_bus.SendCanMessage
+
+        def checked_send(*args, **kwargs):
+            status = original_send(*args, **kwargs)
+            if status != can_bus.CAN_STATUS.SEND_MESSAGE_SUCCESS:
+                raise RuntimeError(f"{arm_name} CAN send failed: {status}")
+            return status
+
+        can_bus.SendCanMessage = checked_send
+        can_bus._pistar_checked_send = True
+
     def _send_arm_target(
         self,
         controller,
@@ -108,28 +138,40 @@ class PiperDAgger(Robot):
         *,
         speed_percent: int | None = None,
         gripper_effort: int,
+        mit_mode: bool = False,
     ):
         if controller is None or move_data is None:
-            return
+            return None
+
+        joint = np.asarray(move_data.get("joint"), dtype=float).reshape(-1)
+        if joint.shape != (6,):
+            raise ValueError(f"joint command must have shape (6,), got {joint.shape}")
+        gripper = float(move_data["gripper"])
+        action = np.concatenate([joint, np.asarray([gripper], dtype=float)])
+        if not np.all(np.isfinite(action)):
+            raise ValueError("arm command must contain only finite values")
 
         if speed_percent is not None:
-            controller.MotionCtrl_2(0x01, 0x01, int(speed_percent), 0x00)
-
-        joint = move_data.get("joint")
-        if joint is not None:
-            joint_cmd = self._joint_to_cmd(joint)
-            controller.JointCtrl(
-                int(joint_cmd[0]),
-                int(joint_cmd[1]),
-                int(joint_cmd[2]),
-                int(joint_cmd[3]),
-                int(joint_cmd[4]),
-                int(joint_cmd[5]),
+            controller.MotionCtrl_2(
+                0x01,
+                0x01,
+                int(speed_percent),
+                0xAD if mit_mode else 0x00,
             )
 
-        if "gripper" in move_data:
-            gripper_cmd = self._gripper_to_cmd(move_data["gripper"])
-            controller.GripperCtrl(gripper_cmd, int(gripper_effort), 0x01, 0)
+        joint_cmd = self._joint_to_cmd(joint)
+        controller.JointCtrl(
+            int(joint_cmd[0]),
+            int(joint_cmd[1]),
+            int(joint_cmd[2]),
+            int(joint_cmd[3]),
+            int(joint_cmd[4]),
+            int(joint_cmd[5]),
+        )
+
+        gripper_cmd = self._gripper_to_cmd(gripper)
+        controller.GripperCtrl(gripper_cmd, int(gripper_effort), 0x01, 0)
+        return action.astype(np.float32)
 
     def reset(self):
         """Reset both arms to start positions with proper state management"""
@@ -146,7 +188,7 @@ class PiperDAgger(Robot):
                 ctrl.MotionCtrl_1(0x00, 0x00, 0x00)  # Clear all modes
                 time.sleep(0.15)
             except Exception as exc:
-                print(f"[reset] {name} exit drag mode failed: {exc}")
+                raise RuntimeError(f"[reset] {name} exit drag mode failed") from exc
 
         # Step 2: Configure both as followers (software controllable)
         try:
@@ -155,45 +197,54 @@ class PiperDAgger(Robot):
             follower.MasterSlaveConfig(FOLLOWER_ROLE, FEEDBACK_OFFSET, CTRL_OFFSET, LINKAGE_OFFSET)
             time.sleep(0.3)
         except Exception as exc:
-            print(f"[reset] MasterSlaveConfig failed: {exc}")
+            raise RuntimeError("[reset] MasterSlaveConfig failed") from exc
 
         # Step 3: Set control mode with slower speed for smoother reset
         reset_speed_percent = 30
         try:
             master.MotionCtrl_2(0x01, 0x01, reset_speed_percent, 0x00)
             time.sleep(0.1)
-            follower.MotionCtrl_2(0x01, 0x01, reset_speed_percent, 0x00)
+            follower.MotionCtrl_2(
+                0x01,
+                0x01,
+                reset_speed_percent,
+                0xAD if self.follower_use_mit_mode else 0x00,
+            )
             time.sleep(0.1)
         except Exception as exc:
-            print(f"[reset] MotionCtrl_2 failed: {exc}")
+            raise RuntimeError("[reset] MotionCtrl_2 failed") from exc
 
         # Step 4: Enable arms
-        try:
-            master.EnableArm(7)
-        except Exception:
-            pass
+        master.EnableArm(7)
         time.sleep(0.1)
-        try:
-            follower.EnableArm(7)
-        except Exception:
-            pass
+        follower.EnableArm(7)
         time.sleep(0.3)  # Wait for enable to take effect
 
         print("[reset] moving to start positions...")
 
         # Step 5: Reset both arms to their configured start poses.
-        try:
-            master_reset_pose = np.array(START_POSITION_ANGLE_MASTER_ARM, dtype=float)
-            follower_reset_pose = np.array(START_POSITION_ANGLE_FOLLOWER_ARM, dtype=float)
-            self.controllers["arm"]["right_arm"].reset(
-                master_reset_pose.copy(), speed_percent=reset_speed_percent
-            )
-            self.controllers["arm"]["left_arm"].reset(
-                follower_reset_pose.copy(), speed_percent=reset_speed_percent
-            )
-            time.sleep(0.5)  # Wait for movement to complete
-        except Exception as exc:
-            print(f"[reset] position reset failed: {exc}")
+        master_state = self.get_master_state()
+        follower_state = self.get_follower_state()
+        self._send_arm_target(
+            master,
+            {
+                "joint": np.asarray(START_POSITION_ANGLE_MASTER_ARM, dtype=float),
+                "gripper": master_state["gripper"],
+            },
+            speed_percent=reset_speed_percent,
+            gripper_effort=self._master_gripper_effort,
+        )
+        self._send_arm_target(
+            follower,
+            {
+                "joint": np.asarray(START_POSITION_ANGLE_FOLLOWER_ARM, dtype=float),
+                "gripper": follower_state["gripper"],
+            },
+            speed_percent=reset_speed_percent,
+            gripper_effort=self._follower_gripper_effort,
+            mit_mode=self.follower_use_mit_mode,
+        )
+        time.sleep(0.5)
 
         print("[reset] reset complete")
 
@@ -204,9 +255,14 @@ class PiperDAgger(Robot):
 
         import time
 
-        # Master arm on can0 (human operates), follower arm on can1 (executes task)
-        self.controllers["arm"]["right_arm"].set_up("can_left_mas")   # master -> can0 (human drags)
-        self.controllers["arm"]["left_arm"].set_up("can_left_slave")    # follower -> can1 (executes)
+        self.controllers["arm"]["right_arm"].set_up(self.master_can)
+        self.controllers["arm"]["left_arm"].set_up(self.follower_can)
+        self._raise_on_can_send_failure(
+            self.controllers["arm"]["right_arm"].controller, "master"
+        )
+        self._raise_on_can_send_failure(
+            self.controllers["arm"]["left_arm"].controller, "follower"
+        )
 
         # 等待 CAN 总线稳定（刚上电时需要更长时间）
         print("[setup] Waiting for CAN bus to stabilize...")
@@ -231,8 +287,7 @@ class PiperDAgger(Robot):
             follower.MotionCtrl_1(0x00, 0x00, 0x00)  # Clear all modes
             time.sleep(0.3)
         except Exception as e:
-            print(f"[setup] Warning: Exit drag mode failed: {e}")
-            print("[setup] Please restart the program if initialization fails")
+            raise RuntimeError("[setup] failed to exit previous drag mode") from e
 
         # CRITICAL: Force reset from MASTER role to FOLLOWER role
         # If master arm was in 0xFA (MASTER) mode, need explicit transition
@@ -249,8 +304,7 @@ class PiperDAgger(Robot):
             follower.MasterSlaveConfig(0xFC, 0, 0, 0)
             time.sleep(0.3)
         except Exception as e:
-            print(f"[setup] Warning: MasterSlaveConfig failed: {e}")
-            print("[setup] Please restart the program if initialization fails")
+            raise RuntimeError("[setup] MasterSlaveConfig failed") from e
 
         # Enable joint control mode with lower speed to prevent jitter
         try:
@@ -261,23 +315,21 @@ class PiperDAgger(Robot):
             # Use slow speed (15%) during setup to prevent sudden movements
             master.MotionCtrl_2(0x01, 0x01, 15, 0x00)
             time.sleep(0.1)
-            follower.MotionCtrl_2(0x01, 0x01, 15, 0x00)
+            follower.MotionCtrl_2(
+                0x01,
+                0x01,
+                15,
+                0xAD if self.follower_use_mit_mode else 0x00,
+            )
             time.sleep(0.2)
 
             # Enable arms to stabilize
-            try:
-                master.EnableArm(7)
-            except Exception:
-                pass
+            master.EnableArm(7)
             time.sleep(0.1)
-            try:
-                follower.EnableArm(7)
-            except Exception:
-                pass
+            follower.EnableArm(7)
             time.sleep(0.2)
         except Exception as e:
-            print(f"[setup] Warning: MotionCtrl failed: {e}")
-            print("[setup] Please restart the program if initialization fails")
+            raise RuntimeError("[setup] MotionCtrl failed") from e
 
         print("[setup] Both arms configured as followers")
 
@@ -290,7 +342,11 @@ class PiperDAgger(Robot):
         })
 
         self.reassert_follower_hold()
-        print("piper_dagger set up success - both arms in follower mode")
+        follower_mode = "MIT (0xAD)" if self.follower_use_mit_mode else "position (0x00)"
+        print(
+            "piper_dagger set up success - both arms in follower role, "
+            f"follower control={follower_mode}"
+        )
 
     def _configure_both_as_followers(self):
         """Configure both arms as followers (software controllable)"""
@@ -313,16 +369,15 @@ class PiperDAgger(Robot):
 
         # Step 3: Enable joint control mode for both arms
         master.MotionCtrl_2(0x01, 0x01, 100, 0x00)  # Enable joint control, max speed
-        follower.MotionCtrl_2(0x01, 0x01, 100, 0x00)  # Enable joint control, max speed
+        follower.MotionCtrl_2(
+            0x01,
+            0x01,
+            100,
+            0xAD if self.follower_use_mit_mode else 0x00,
+        )
         time.sleep(0.1)
-        try:
-            master.EnableArm(7)
-        except Exception:
-            pass
-        try:
-            follower.EnableArm(7)
-        except Exception:
-            pass
+        master.EnableArm(7)
+        follower.EnableArm(7)
 
         self.reassert_follower_hold()
         print("[reset] Both arms configured as followers")
@@ -330,14 +385,7 @@ class PiperDAgger(Robot):
     def move_follower(self, move_data, bypass_policy: bool = False):
         # Allow teleop/intervention to bypass policy gating.
         if not self._policy_enabled and not bypass_policy:
-            return
-        follower_controller = self.controllers["arm"]["left_arm"].controller
-        self._send_arm_target(
-            follower_controller,
-            move_data,
-            speed_percent=100,
-            gripper_effort=self._follower_gripper_effort,
-        )
+            return None
         if self._sync_master_with_policy_commands and self._policy_enabled and not bypass_policy:
             # During autonomous rollout, send the same target to the master arm immediately
             # instead of waiting for feedback-based mirroring, which lags behind the follower.
@@ -348,6 +396,15 @@ class PiperDAgger(Robot):
                 speed_percent=100,
                 gripper_effort=self._master_gripper_effort,
             )
+        follower_controller = self.controllers["arm"]["left_arm"].controller
+        sent_action = self._send_arm_target(
+            follower_controller,
+            move_data,
+            speed_percent=100,
+            gripper_effort=self._follower_gripper_effort,
+            mit_mode=self.follower_use_mit_mode,
+        )
+        return sent_action
 
     def move_master(self, move_data):
         master_controller = self.controllers["arm"]["right_arm"].controller
@@ -405,6 +462,7 @@ class PiperDAgger(Robot):
                 "gripper": state["gripper"],
             },
             gripper_effort=self._follower_gripper_effort,
+            mit_mode=self.follower_use_mit_mode,
         )
 
     def reassert_follower_hold(self):
@@ -488,6 +546,7 @@ class PiperDAgger(Robot):
                 "gripper": gripper_cmd / (70 * 1000),
             },
             gripper_effort=self._follower_gripper_effort,
+            mit_mode=self.follower_use_mit_mode,
         )
 
     def mirror_follower_to_master(self):
@@ -594,10 +653,7 @@ class PiperDAgger(Robot):
         # Step 3: Enable normal joint control with slow speed (15%)
         master.MotionCtrl_2(0x01, 0x01, 15, 0x00)
         time.sleep(0.1)
-        try:
-            master.EnableArm(7)
-        except Exception:
-            pass
+        master.EnableArm(7)
         time.sleep(0.15)
 
         self.reassert_follower_hold()
