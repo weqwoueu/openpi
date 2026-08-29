@@ -1,33 +1,16 @@
+from pathlib import Path
+import subprocess
 import sys
+import time
+
 sys.path.append("./")
 
 import numpy as np
-import time
 
 from my_robot.base_robot import Robot
 from my_robot.camera_config import get_piper_camera_serials
 from robot.controller.Piper_controller import PiperController
 from robot.sensor.Realsense_sensor import RealsenseSensor
-
-# Start positions are in radians.
-START_POSITION_ANGLE_FOLLOWER_ARM = [
-    0,
-    1.0,
-    -1.0,
-    1.0,
-    0,
-    0,
-]
-
-# Master and follower use the same task reset pose.
-START_POSITION_ANGLE_MASTER_ARM = [
-    0,
-    1.0,
-    -1.0,
-    1.0,
-    0,
-    0,
-]
 
 # Master-slave linkage config (0x470).
 MASTER_ROLE = 0xFA  # teaching input arm
@@ -174,81 +157,8 @@ class PiperDAgger(Robot):
         return action.astype(np.float32)
 
     def reset(self):
-        """Reset both arms to start positions with proper state management"""
-        master = self.controllers["arm"]["right_arm"].controller
-        follower = self.controllers["arm"]["left_arm"].controller
-
-        print("[reset] preparing arms for reset...")
-
-        # Step 1: Exit any special modes for both arms
-        for ctrl, name in ((master, "master"), (follower, "follower")):
-            try:
-                ctrl.MotionCtrl_1(0x00, 0x00, 0x02)  # Exit drag teaching
-                time.sleep(0.15)
-                ctrl.MotionCtrl_1(0x00, 0x00, 0x00)  # Clear all modes
-                time.sleep(0.15)
-            except Exception as exc:
-                raise RuntimeError(f"[reset] {name} exit drag mode failed") from exc
-
-        # Step 2: Configure both as followers (software controllable)
-        try:
-            master.MasterSlaveConfig(FOLLOWER_ROLE, FEEDBACK_OFFSET, CTRL_OFFSET, LINKAGE_OFFSET)
-            time.sleep(0.2)
-            follower.MasterSlaveConfig(FOLLOWER_ROLE, FEEDBACK_OFFSET, CTRL_OFFSET, LINKAGE_OFFSET)
-            time.sleep(0.3)
-        except Exception as exc:
-            raise RuntimeError("[reset] MasterSlaveConfig failed") from exc
-
-        # Step 3: Set control mode with slower speed for smoother reset
-        reset_speed_percent = 30
-        try:
-            master.MotionCtrl_2(0x01, 0x01, reset_speed_percent, 0x00)
-            time.sleep(0.1)
-            follower.MotionCtrl_2(
-                0x01,
-                0x01,
-                reset_speed_percent,
-                0xAD if self.follower_use_mit_mode else 0x00,
-            )
-            time.sleep(0.1)
-        except Exception as exc:
-            raise RuntimeError("[reset] MotionCtrl_2 failed") from exc
-
-        # Step 4: Enable arms
-        master.EnableArm(7)
-        time.sleep(0.1)
-        follower.EnableArm(7)
-        time.sleep(0.3)  # Wait for enable to take effect
-
-        print("[reset] moving to start positions...")
-
-        # Step 5: Reset both arms to their configured start poses.
-        master_state = self.get_master_state()
-        follower_state = self.get_follower_state()
-        self._send_arm_target(
-            master,
-            {
-                "joint": np.asarray(START_POSITION_ANGLE_MASTER_ARM, dtype=float),
-                "gripper": master_state["gripper"],
-            },
-            speed_percent=reset_speed_percent,
-            gripper_effort=self._master_gripper_effort,
-        )
-        self._send_arm_target(
-            follower,
-            {
-                "joint": np.asarray(START_POSITION_ANGLE_FOLLOWER_ARM, dtype=float),
-                "gripper": follower_state["gripper"],
-            },
-            speed_percent=reset_speed_percent,
-            gripper_effort=self._follower_gripper_effort,
-            mit_mode=self.follower_use_mit_mode,
-        )
-        time.sleep(0.5)
-
-        print("[reset] reset complete")
-
-       
+        reset_script = Path(__file__).resolve().parents[1] / "scripts/piperx/2_arm_go_init.sh"
+        subprocess.run(["bash", str(reset_script)], check=True)
 
     def set_up(self):
         super().set_up()

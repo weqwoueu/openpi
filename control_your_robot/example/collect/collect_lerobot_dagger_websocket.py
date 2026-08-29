@@ -15,6 +15,7 @@ import queue
 import re
 import select
 import signal
+import subprocess
 import sys
 import termios
 import threading
@@ -454,11 +455,13 @@ class DaggerEpisodeTracker:
 class InferenceRequest:
     generation: int
     observation: dict
+    lead_steps: int = 0
 
 
 @dataclass(frozen=True)
 class InferenceResponse:
     generation: int
+    lead_steps: int = 0
     result: dict | None = None
     error: BaseException | None = None
 
@@ -502,9 +505,21 @@ class InferenceWorker:
                 return
             try:
                 result = self.policy_client.infer(request.observation)
-                self._responses.put(InferenceResponse(request.generation, result=result))
+                self._responses.put(
+                    InferenceResponse(
+                        request.generation,
+                        lead_steps=request.lead_steps,
+                        result=result,
+                    )
+                )
             except BaseException as error:
-                self._responses.put(InferenceResponse(request.generation, error=error))
+                self._responses.put(
+                    InferenceResponse(
+                        request.generation,
+                        lead_steps=request.lead_steps,
+                        error=error,
+                    )
+                )
 
     def stop(self):
         self._stop_event.set()
@@ -728,6 +743,8 @@ class DaggerRuntime:
         feedback_fallback: bool,
         teleop_mapping: TeleopMapping,
         filter_kwargs: dict,
+        prefetch_threshold: int = 0,
+        reset_script=None,
     ):
         self.robot = robot
         self.collector = collector
@@ -737,8 +754,15 @@ class DaggerRuntime:
         self.sample_period = 1.0 / float(sample_fps)
         self.teleop_fps = float(teleop_fps)
         self.chunk_size = int(chunk_size)
-        self.prefetch_threshold = max(1, self.chunk_size // 2)
+        self.prefetch_threshold = int(prefetch_threshold)
+        if not 0 <= self.prefetch_threshold < self.chunk_size:
+            raise ValueError("prefetch_threshold must be in [0, chunk_size)")
         self.reset_settle_seconds = float(reset_settle_seconds)
+        self.reset_script = Path(
+            reset_script
+            if reset_script is not None
+            else CONTROL_ROOT / "scripts" / "piperx" / "2_arm_go_init.sh"
+        )
         self.alignment_timeout = float(alignment_timeout)
         self.feedback_fallback = bool(feedback_fallback)
         self.teleop_mapping = teleop_mapping
@@ -758,7 +782,7 @@ class DaggerRuntime:
         self.stop_active_control(restore_master=True)
         self.collector.clear_current_episode()
         self.robot.set_policy_enabled(False)
-        self.robot.reset()
+        self._run_reset_script()
         if self.reset_settle_seconds > 0:
             time.sleep(self.reset_settle_seconds)
         self.robot.set_policy_enabled(True)
@@ -772,6 +796,11 @@ class DaggerRuntime:
         self._submit_inference()
         self._next_sample_at = time.monotonic()
 
+    def _run_reset_script(self):
+        if not self.reset_script.is_file():
+            raise FileNotFoundError(f"reset script not found: {self.reset_script}")
+        subprocess.run(["bash", str(self.reset_script)], check=True)
+
     def _invalidate_policy(self, generation: int):
         self.generation = generation
         self._actions.clear()
@@ -781,8 +810,13 @@ class DaggerRuntime:
     def _submit_inference(self):
         if self._pending_generation is not None or self._latest_observation is None:
             return
+        lead_steps = len(self._actions)
         self.inference_worker.submit(
-            InferenceRequest(self.generation, self._latest_observation)
+            InferenceRequest(
+                self.generation,
+                self._latest_observation,
+                lead_steps=lead_steps,
+            )
         )
         self._pending_generation = self.generation
 
@@ -793,7 +827,13 @@ class DaggerRuntime:
             self._pending_generation = None
             if response.error is not None:
                 raise RuntimeError("WebSocket inference failed") from response.error
-            self._actions.extend(select_action_chunk(response.result["actions"], self.chunk_size))
+            action_chunk = select_action_chunk(response.result["actions"], self.chunk_size)
+            if not 0 <= response.lead_steps < len(action_chunk):
+                raise RuntimeError(
+                    f"invalid inference lead_steps={response.lead_steps} "
+                    f"for chunk length {len(action_chunk)}"
+                )
+            self._actions.extend(action_chunk[response.lead_steps :])
 
     def tick_autonomous(self):
         self._drain_policy_responses()
@@ -801,16 +841,17 @@ class DaggerRuntime:
         if now < self._next_sample_at:
             return False
 
-        if self._actions:
-            requested_action = self._actions.popleft()
-            self._last_policy_action = requested_action.copy()
-        else:
-            requested_action = self._last_policy_action
-
-        if requested_action is None:
+        if not self._actions:
+            if self._pending_generation is None:
+                self._latest_observation = make_policy_observation(
+                    self.robot.get(), self.prompt, self.inference_adv_ind
+                )
             self._submit_inference()
             self._advance_sample_clock(now)
             return False
+
+        requested_action = self._actions.popleft()
+        self._last_policy_action = requested_action.copy()
 
         sent_action = self.robot.move_follower(policy_action_to_move(requested_action))
         if sent_action is None:
@@ -981,6 +1022,12 @@ def _build_parser():
     parser.add_argument("--sample-fps", type=float, default=30.0)
     parser.add_argument("--teleop-fps", type=float, default=60.0)
     parser.add_argument("--chunk-size", type=int, default=10)
+    parser.add_argument(
+        "--prefetch-threshold",
+        type=int,
+        default=0,
+        help="request the next chunk with this many current actions remaining; 0 disables overlap",
+    )
     parser.add_argument("--num-episode", type=int, default=-1)
     parser.add_argument("--max-step", type=int, default=900, help="-1 disables automatic episode stop")
     parser.add_argument("--target-autonomous-success", type=int, default=-1)
@@ -1014,6 +1061,8 @@ def main():
         raise SystemExit("--sample-fps and --teleop-fps must be positive")
     if args.chunk_size <= 0:
         raise SystemExit("--chunk-size must be positive")
+    if not 0 <= args.prefetch_threshold < args.chunk_size:
+        raise SystemExit("--prefetch-threshold must be in [0, chunk-size)")
     if args.num_episode == 0 or args.num_episode < -1:
         raise SystemExit("--num-episode must be -1 or a positive integer")
     if args.max_step == 0 or args.max_step < -1:
@@ -1097,7 +1146,9 @@ def main():
             sample_fps=args.sample_fps,
             teleop_fps=args.teleop_fps,
             chunk_size=args.chunk_size,
+            prefetch_threshold=args.prefetch_threshold,
             reset_settle_seconds=args.reset_settle_seconds,
+            reset_script=CONTROL_ROOT / "scripts" / "piperx" / "2_arm_go_init.sh",
             alignment_timeout=args.alignment_timeout,
             feedback_fallback=args.feedback_fallback,
             teleop_mapping=TeleopMapping(

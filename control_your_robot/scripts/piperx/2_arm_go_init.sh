@@ -5,9 +5,9 @@ set -euo pipefail
 # Edit this path manually. It must contain my_env.sh and control_your_robot/.
 REPO_ROOT="/home/standard/workspace/pistar/openpi"
 
-SPEED=10
+SPEED=15
 GRIPPER=0
-MOVE_WAIT_SECONDS=6
+MOVE_WAIT_SECONDS=5
 
 ENV_SCRIPT="${REPO_ROOT}/my_env.sh"
 PIPERX_SCRIPTS="${REPO_ROOT}/control_your_robot/scripts/piperx"

@@ -6,7 +6,7 @@ set -euo pipefail
 REPO_ROOT="/home/standard/workspace/pistar/openpi"
 
 # Raw rollout/DAgger dataset. Keep it separate from the expert dataset.
-REPO_ID="piperx/piperx_black_plug_dagger"
+REPO_ID="piperx/piperx_plug_dagger_demo"
 OUTPUT_DIR="/home/standard/agilex/lerobot"
 TASK_PROMPT="put the black plug into the two-hole socket"
 
@@ -17,7 +17,9 @@ FOLLOWER_CAN="can_left_slave"
 
 SAMPLE_FPS=30
 TELEOP_FPS=60
-CHUNK_SIZE=10
+CHUNK_SIZE=50
+# Request the next chunk with this many current actions left. 0 disables overlap.
+PREFETCH_THRESHOLD=0
 # Positive integer: save this many episodes. -1: keep collecting.
 NUM_EPISODES=-1
 # Positive integer: automatically stop for labeling at this frame. -1: unlimited RAM growth.
@@ -82,6 +84,7 @@ args=(
     --sample-fps "$SAMPLE_FPS"
     --teleop-fps "$TELEOP_FPS"
     --chunk-size "$CHUNK_SIZE"
+    --prefetch-threshold "$PREFETCH_THRESHOLD"
     --num-episode "$NUM_EPISODES"
     --max-step "$MAX_STEPS"
     --target-autonomous-success "$TARGET_AUTONOMOUS_SUCCESS"

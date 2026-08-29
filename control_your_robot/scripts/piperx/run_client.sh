@@ -9,10 +9,10 @@ SERVER_PORT=8000
 ARM_CAN="can_left_slave"
 TASK_PROMPT="put the black plug into the two-hole socket"
 CONTROL_FREQ=30
-CHUNK_SIZE=10
-MAX_STEPS=600
+CHUNK_SIZE=50
+MAX_STEPS=600000
 # Positive integer: run a fixed number of episodes. -1: run forever.
-NUM_EPISODES=1
+NUM_EPISODES=-1
 # Ordinary pi0.5: leave empty. Future PiStar inference: positive.
 ADV_IND=""
 # =============================================================

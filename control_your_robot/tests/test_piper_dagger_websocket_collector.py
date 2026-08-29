@@ -129,8 +129,8 @@ class FakeRobot:
         ]
 
 
-def _make_runtime(worker=None, robot=None, collector=None):
-    return DAGGER.DaggerRuntime(
+def _make_runtime(worker=None, robot=None, collector=None, **runtime_kwargs):
+    kwargs = dict(
         robot=robot or FakeRobot(),
         collector=collector or FakeCollector(),
         inference_worker=worker or FakeInferenceWorker(),
@@ -151,6 +151,8 @@ def _make_runtime(worker=None, robot=None, collector=None):
         ),
         filter_kwargs={},
     )
+    kwargs.update(runtime_kwargs)
+    return DAGGER.DaggerRuntime(**kwargs)
 
 
 def test_stale_inference_response_is_discarded_by_generation():
@@ -170,6 +172,69 @@ def test_stale_inference_response_is_discarded_by_generation():
 
     assert len(runtime._actions) == 3
     np.testing.assert_array_equal(np.asarray(runtime._actions), current_actions)
+
+
+def test_prefetched_chunk_skips_actions_for_old_queue_lead():
+    old_tail = np.full((2, 7), -1.0, dtype=np.float32)
+    new_chunk = np.repeat(np.arange(5, dtype=np.float32)[:, None], 7, axis=1)
+    worker = FakeInferenceWorker(
+        [DAGGER.InferenceResponse(3, lead_steps=2, result={"actions": new_chunk})]
+    )
+    runtime = _make_runtime(worker=worker, prefetch_threshold=2, chunk_size=5)
+    runtime.generation = 3
+    runtime._pending_generation = 3
+    runtime._actions.extend(old_tail)
+
+    runtime._drain_policy_responses()
+
+    expected = np.concatenate([old_tail, new_chunk[2:]], axis=0)
+    np.testing.assert_array_equal(np.asarray(runtime._actions), expected)
+
+
+def test_prefetch_request_records_remaining_action_count(monkeypatch):
+    worker = FakeInferenceWorker()
+    runtime = _make_runtime(worker=worker, prefetch_threshold=1)
+    runtime.generation = 4
+    runtime._actions.extend(np.zeros((2, 7), dtype=np.float32))
+    runtime._next_sample_at = 0
+    monkeypatch.setattr(DAGGER, "make_policy_observation", lambda *args, **kwargs: {"obs": 1})
+
+    assert runtime.tick_autonomous()
+
+    assert len(worker.requests) == 1
+    assert worker.requests[0].lead_steps == 1
+
+
+def test_waiting_for_inference_does_not_resend_or_collect():
+    robot = FakeRobot()
+    collector = FakeCollector()
+    runtime = _make_runtime(robot=robot, collector=collector)
+    runtime.generation = 5
+    runtime._pending_generation = 5
+    runtime._last_policy_action = np.ones(7, dtype=np.float32)
+    runtime._next_sample_at = 0
+
+    assert not runtime.tick_autonomous()
+
+    assert robot.sent == []
+    assert collector.collected == []
+    assert runtime.step_count == 0
+
+
+def test_reset_runs_existing_two_arm_init_script(tmp_path, monkeypatch):
+    reset_script = tmp_path / "2_arm_go_init.sh"
+    reset_script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        DAGGER.subprocess,
+        "run",
+        lambda command, check: calls.append((command, check)),
+    )
+    runtime = _make_runtime(reset_script=reset_script)
+
+    runtime._run_reset_script()
+
+    assert calls == [(["bash", str(reset_script)], True)]
 
 
 def test_raw_dagger_save_keeps_advantage_unlabeled():

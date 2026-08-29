@@ -3,10 +3,10 @@
 set -euo pipefail
 
 # ==================== Edit these settings ====================
-REPO_ROOT="/mnt/kpfs_juice/liuzijian/code/openpi"
-CHECKPOINT_DIR="/mnt/kpfs_juice/liuzijian/checkpoints/openpi/pi05_piperx_plug_sft/piperx_black_plug_0825_v3_sft_run_001/10000"
+REPO_ROOT="/home/standard/workspace/pistar/openpi"
+CHECKPOINT_DIR="/home/standard/workspace/liuzijian/checkpoints/openpi/pi05_piperx_plug_sft/piperx_plug_sft/29999"
 TRAIN_CONFIG="pi05_piperx_plug_sft"
-OPENPI_DATA_HOME_DIR="/mnt/kpfs_juice/liuzijian/cache/openpi"
+OPENPI_DATA_HOME_DIR="/home/standard/workspace/liuzijian/checkpoints/openpi"
 CUDA_VISIBLE_DEVICES_VALUE="0"
 XLA_PYTHON_CLIENT_PREALLOCATE_VALUE="false"
 HOST="0.0.0.0"
