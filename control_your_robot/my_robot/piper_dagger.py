@@ -13,7 +13,6 @@ from robot.controller.Piper_controller import PiperController
 from robot.sensor.Realsense_sensor import RealsenseSensor
 
 # Master-slave linkage config (0x470).
-MASTER_ROLE = 0xFA  # teaching input arm
 FOLLOWER_ROLE = 0xFC  # motion output arm
 FEEDBACK_OFFSET = 0x00
 CTRL_OFFSET = 0x00
@@ -501,19 +500,9 @@ class PiperDAgger(Robot):
         if master is None:
             raise RuntimeError("Master controller is not initialized")
 
-        # Step 1: Exit any existing modes first
-        master.MotionCtrl_1(0x00, 0x00, 0x02)  # Exit drag teaching
-        time.sleep(0.1)
-        master.MotionCtrl_1(0x00, 0x00, 0x00)  # Clear all modes
-        time.sleep(0.1)
-
-        # Switching directly to the teaching-input role releases the master arm.
-        # Do not enter MotionCtrl_1 teaching-record mode here: the SDK's master
-        # setup and the working PiperX reference only require MasterSlaveConfig.
-        master.MasterSlaveConfig(MASTER_ROLE, FEEDBACK_OFFSET, CTRL_OFFSET, LINKAGE_OFFSET)
-        time.sleep(0.5)
-
-        # Reduce teaching-pendant friction (lower = lighter).
+        # This is software teleoperation, not Piper's native linked master/slave
+        # mode. Keep the master in its current software-control role and use the
+        # dedicated drag-teach command to release it with gravity compensation.
         try:
             if hasattr(master, "GripperTeachingPendantParamConfig"):
                 master.GripperTeachingPendantParamConfig(
@@ -525,8 +514,30 @@ class PiperDAgger(Robot):
         except Exception as e:
             print(f"[warn] failed to set teaching friction: {e}")
 
+        master.MotionCtrl_1(0x00, 0x00, 0x01)
+
+        deadline = time.monotonic() + 1.5
+        mode = teach = arm_state = None
+        while time.monotonic() < deadline:
+            status = master.GetArmStatus().arm_status
+            mode = int(status.ctrl_mode)
+            teach = int(status.teach_status)
+            arm_state = int(status.arm_status)
+            if mode == 0x02 and teach == 0x01:
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError(
+                "master failed to enter drag teaching mode: "
+                f"ctrl_mode=0x{mode:02X}, teach_status=0x{teach:02X}, "
+                f"arm_status=0x{arm_state:02X}"
+            )
+
         self.reset_intervention_tracking()
-        print("[mode] master arm switched to teaching-input role (0xFA) - FREE TO DRAG")
+        print(
+            "[mode] master drag teaching confirmed "
+            f"(ctrl_mode=0x{mode:02X}, teach_status=0x{teach:02X}) - FREE TO DRAG"
+        )
 
     def disable_master_drag_mode(self):
         """Disable intervention mode: master arm becomes software-controllable follower"""
@@ -540,26 +551,25 @@ class PiperDAgger(Robot):
         # the follower untouched and simply re-assert its current target.
         self.reassert_follower_hold()
 
-        # Step 1: Exit drag teaching mode
+        master_state = self.get_master_state()
+
+        # Exit drag teaching, then use the live pose as the first CAN target so
+        # the master does not return to a stale pre-takeover command.
         master.MotionCtrl_1(0x00, 0x00, 0x02)  # Exit drag teaching
-        time.sleep(0.15)
-        master.MotionCtrl_1(0x00, 0x00, 0x00)  # Clear all modes
         time.sleep(0.15)
 
         self.reset_intervention_tracking()
-
-        # Step 2: Switch back to follower role for software control
-        master.MasterSlaveConfig(FOLLOWER_ROLE, FEEDBACK_OFFSET, CTRL_OFFSET, LINKAGE_OFFSET)
-        time.sleep(0.25)
-
-        # Step 3: Enable normal joint control with slow speed (15%)
-        master.MotionCtrl_2(0x01, 0x01, 15, 0x00)
-        time.sleep(0.1)
+        self._send_arm_target(
+            master,
+            master_state,
+            speed_percent=15,
+            gripper_effort=self._master_gripper_effort,
+        )
         master.EnableArm(7)
         time.sleep(0.15)
 
         self.reassert_follower_hold()
-        print("[mode] master arm back to follower mode (0xFC) - software control ready")
+        print("[mode] master arm back to CAN joint control - software control ready")
 
     def reset_to_follower_mode(self):
         """Reset both arms to follower mode (called at episode end)"""

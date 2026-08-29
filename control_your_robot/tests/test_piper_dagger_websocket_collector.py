@@ -426,6 +426,11 @@ class FakeSdk:
         self.motion_ctrl_1_calls = []
         self.master_slave_calls = []
         self.teaching_param_calls = []
+        self.status = types.SimpleNamespace(
+            ctrl_mode=0x02,
+            teach_status=0x01,
+            arm_status=0x00,
+        )
 
     def MotionCtrl_1(self, *args):
         self.motion_ctrl_1_calls.append(args)
@@ -438,6 +443,9 @@ class FakeSdk:
 
     def GripperTeachingPendantParamConfig(self, **kwargs):
         self.teaching_param_calls.append(kwargs)
+
+    def GetArmStatus(self):
+        return types.SimpleNamespace(arm_status=self.status)
 
     def JointCtrl(self, *_joints):
         pass
@@ -518,13 +526,8 @@ def test_piper_dagger_policy_send_uses_mit_for_follower(monkeypatch):
     robot.reset_intervention_tracking = lambda: None
     robot.enable_master_drag_mode()
 
-    assert master.controller.master_slave_calls == [
-        (piper_module.MASTER_ROLE, 0x00, 0x00, 0x00)
-    ]
-    assert master.controller.motion_ctrl_1_calls == [
-        (0x00, 0x00, 0x02),
-        (0x00, 0x00, 0x00),
-    ]
+    assert master.controller.master_slave_calls == []
+    assert master.controller.motion_ctrl_1_calls == [(0x00, 0x00, 0x01)]
     assert master.controller.teaching_param_calls == [
         {
             "teaching_range_per": 100,
