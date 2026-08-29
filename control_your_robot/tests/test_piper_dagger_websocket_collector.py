@@ -427,16 +427,25 @@ class FakeSdk:
         self.master_slave_calls = []
         self.teaching_param_calls = []
         self.status = types.SimpleNamespace(
-            ctrl_mode=0x02,
-            teach_status=0x01,
+            ctrl_mode=0x01,
+            teach_status=0x00,
             arm_status=0x00,
+            motion_status=0x00,
+            mode_feed=0x01,
         )
 
     def MotionCtrl_1(self, *args):
         self.motion_ctrl_1_calls.append(args)
+        if args[2] == 0x01:
+            self.status.ctrl_mode = 0x02
+            self.status.teach_status = 0x01
+        elif args[2] == 0x02:
+            self.status.teach_status = 0x02
 
     def MotionCtrl_2(self, _ctrl_mode, _move_mode, _speed, mode_flag):
         self.mode_flags.append(mode_flag)
+        self.status.ctrl_mode = 0x01
+        self.status.motion_status = 0x00
 
     def MasterSlaveConfig(self, *args):
         self.master_slave_calls.append(args)
@@ -524,10 +533,19 @@ def test_piper_dagger_policy_send_uses_mit_for_follower(monkeypatch):
 
     monkeypatch.setattr(piper_module.time, "sleep", lambda _seconds: None)
     robot.reset_intervention_tracking = lambda: None
+    robot.get_master_state = lambda: {
+        "joint": np.arange(6, dtype=float) / 10,
+        "gripper": 0.5,
+    }
+    master.controller.status.teach_status = 0x01
+    master.controller.status.motion_status = 0x01
     robot.enable_master_drag_mode()
 
     assert master.controller.master_slave_calls == []
-    assert master.controller.motion_ctrl_1_calls == [(0x00, 0x00, 0x01)]
+    assert master.controller.motion_ctrl_1_calls == [
+        (0x00, 0x00, 0x02),
+        (0x00, 0x00, 0x01),
+    ]
     assert master.controller.teaching_param_calls == [
         {
             "teaching_range_per": 100,

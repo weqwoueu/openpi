@@ -500,6 +500,48 @@ class PiperDAgger(Robot):
         if master is None:
             raise RuntimeError("Master controller is not initialized")
 
+        status = master.GetArmStatus().arm_status
+        if int(status.ctrl_mode) == 0x01 and int(status.teach_status) == 0x01:
+            # Cancel a previously accepted but incomplete teach-mode request.
+            master.MotionCtrl_1(0x00, 0x00, 0x02)
+            time.sleep(0.1)
+
+        # Stop the master's last autonomous MOVE_J at its live feedback pose.
+        # A still-pending policy target can keep ctrl_mode in CAN control even
+        # after the drag-teach request has been accepted.
+        master_state = self.get_master_state()
+        self._send_arm_target(
+            master,
+            master_state,
+            speed_percent=15,
+            gripper_effort=self._master_gripper_effort,
+        )
+
+        settle_deadline = time.monotonic() + 2.0
+        mode = teach = arm_state = motion = mode_feed = None
+        while time.monotonic() < settle_deadline:
+            status = master.GetArmStatus().arm_status
+            mode = int(status.ctrl_mode)
+            teach = int(status.teach_status)
+            arm_state = int(status.arm_status)
+            motion = int(status.motion_status)
+            mode_feed = int(status.mode_feed)
+            if (
+                mode == 0x01
+                and teach in (0x00, 0x02)
+                and arm_state == 0x00
+                and motion == 0x00
+            ):
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError(
+                "master did not settle before drag teaching: "
+                f"ctrl_mode=0x{mode:02X}, mode_feed=0x{mode_feed:02X}, "
+                f"teach_status=0x{teach:02X}, motion_status=0x{motion:02X}, "
+                f"arm_status=0x{arm_state:02X}"
+            )
+
         # This is software teleoperation, not Piper's native linked master/slave
         # mode. Keep the master in its current software-control role and use the
         # dedicated drag-teach command to release it with gravity compensation.
@@ -517,19 +559,21 @@ class PiperDAgger(Robot):
         master.MotionCtrl_1(0x00, 0x00, 0x01)
 
         deadline = time.monotonic() + 1.5
-        mode = teach = arm_state = None
         while time.monotonic() < deadline:
             status = master.GetArmStatus().arm_status
             mode = int(status.ctrl_mode)
             teach = int(status.teach_status)
             arm_state = int(status.arm_status)
+            motion = int(status.motion_status)
+            mode_feed = int(status.mode_feed)
             if mode == 0x02 and teach == 0x01:
                 break
             time.sleep(0.05)
         else:
             raise RuntimeError(
                 "master failed to enter drag teaching mode: "
-                f"ctrl_mode=0x{mode:02X}, teach_status=0x{teach:02X}, "
+                f"ctrl_mode=0x{mode:02X}, mode_feed=0x{mode_feed:02X}, "
+                f"teach_status=0x{teach:02X}, motion_status=0x{motion:02X}, "
                 f"arm_status=0x{arm_state:02X}"
             )
 
