@@ -914,20 +914,18 @@ class DaggerRuntime:
         deadline = time.monotonic() + self.alignment_timeout
         while time.monotonic() < deadline:
             action = _read_master_ctrl_action(master, after_timestamp=after_ctrl_timestamp)
-            if action is None and self.feedback_fallback:
-                action = _read_master_feedback_action(master)
             if action is not None:
                 return action
             time.sleep(0.02)
-        raise RuntimeError("master control frame is not ready after switching to drag mode")
+        raise RuntimeError(
+            "no new master control frame after switching to input role; "
+            "feedback fallback is not valid for PiperX native master mode"
+        )
 
     def _read_aligned_master_action(self, master):
         if self.teleop_mapping.source == "feedback":
             return _read_master_feedback_action(master)
-        action = _read_master_ctrl_action(master)
-        if action is None and self.feedback_fallback:
-            return _read_master_feedback_action(master)
-        return action
+        return _read_master_ctrl_action(master)
 
     def tick_intervention(self):
         try:

@@ -221,6 +221,19 @@ def test_waiting_for_inference_does_not_resend_or_collect():
     assert runtime.step_count == 0
 
 
+def test_takeover_requires_new_master_control_frame(monkeypatch):
+    runtime = _make_runtime(feedback_fallback=True, alignment_timeout=0.01)
+    monkeypatch.setattr(DAGGER, "_read_master_ctrl_action", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        DAGGER,
+        "_read_master_feedback_action",
+        lambda _master: (np.zeros(6), 0.0, "feedback"),
+    )
+
+    with pytest.raises(RuntimeError, match="no new master control frame"):
+        runtime._wait_for_master_action(object(), after_ctrl_timestamp=0.0)
+
+
 def test_reset_runs_existing_two_arm_init_script(tmp_path, monkeypatch):
     reset_script = tmp_path / "2_arm_go_init.sh"
     reset_script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
@@ -437,7 +450,8 @@ class FakeSdk:
     def MotionCtrl_1(self, *args):
         self.motion_ctrl_1_calls.append(args)
         if args[2] == 0x01:
-            self.status.ctrl_mode = 0x02
+            if self.status.ctrl_mode != 0x06:
+                self.status.ctrl_mode = 0x02
             self.status.teach_status = 0x01
         elif args[2] == 0x02:
             self.status.teach_status = 0x02
@@ -449,6 +463,10 @@ class FakeSdk:
 
     def MasterSlaveConfig(self, *args):
         self.master_slave_calls.append(args)
+        if args[0] == 0xFA:
+            self.status.ctrl_mode = 0x06
+        elif args[0] == 0xFC:
+            self.status.ctrl_mode = 0x01
 
     def GripperTeachingPendantParamConfig(self, **kwargs):
         self.teaching_param_calls.append(kwargs)
@@ -541,7 +559,9 @@ def test_piper_dagger_policy_send_uses_mit_for_follower(monkeypatch):
     master.controller.status.motion_status = 0x01
     robot.enable_master_drag_mode()
 
-    assert master.controller.master_slave_calls == []
+    assert master.controller.master_slave_calls == [
+        (piper_module.MASTER_ROLE, 0x00, 0x00, 0x00)
+    ]
     assert master.controller.motion_ctrl_1_calls == [
         (0x00, 0x00, 0x02),
         (0x00, 0x00, 0x01),

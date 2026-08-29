@@ -13,6 +13,7 @@ from robot.controller.Piper_controller import PiperController
 from robot.sensor.Realsense_sensor import RealsenseSensor
 
 # Master-slave linkage config (0x470).
+MASTER_ROLE = 0xFA  # teaching input arm
 FOLLOWER_ROLE = 0xFC  # motion output arm
 FEEDBACK_OFFSET = 0x00
 CTRL_OFFSET = 0x00
@@ -330,6 +331,33 @@ class PiperDAgger(Robot):
     def get_master_state(self):
         return self.controllers["arm"]["right_arm"].get_state()
 
+    def get_master_input_state(self):
+        """Read the live master pose, preferring its teaching control frames."""
+        master = self.controllers["arm"]["right_arm"].controller
+        try:
+            ctrl = master.GetArmJointCtrl()
+            if getattr(ctrl, "Hz", 0) > 0:
+                joints = ctrl.joint_ctrl
+                gripper = master.GetArmGripperCtrl().gripper_ctrl.grippers_angle
+                return {
+                    "joint": np.array(
+                        [
+                            joints.joint_1,
+                            joints.joint_2,
+                            joints.joint_3,
+                            joints.joint_4,
+                            joints.joint_5,
+                            joints.joint_6,
+                        ],
+                        dtype=float,
+                    )
+                    / 57295.7795,
+                    "gripper": float(gripper) / (70 * 1000),
+                }
+        except Exception:
+            pass
+        return self.get_master_state()
+
     def get_follower_state(self):
         return self.controllers["arm"]["left_arm"].get_state()
 
@@ -542,9 +570,16 @@ class PiperDAgger(Robot):
                 f"arm_status=0x{arm_state:02X}"
             )
 
-        # This is software teleoperation, not Piper's native linked master/slave
-        # mode. Keep the master in its current software-control role and use the
-        # dedicated drag-teach command to release it with gravity compensation.
+        # This PiperX teaching arm uses its native input-arm role for manual
+        # motion. Switch only after the last autonomous MOVE_J is confirmed still.
+        master.MasterSlaveConfig(
+            MASTER_ROLE,
+            FEEDBACK_OFFSET,
+            CTRL_OFFSET,
+            LINKAGE_OFFSET,
+        )
+        time.sleep(0.5)
+
         try:
             if hasattr(master, "GripperTeachingPendantParamConfig"):
                 master.GripperTeachingPendantParamConfig(
@@ -558,30 +593,8 @@ class PiperDAgger(Robot):
 
         master.MotionCtrl_1(0x00, 0x00, 0x01)
 
-        deadline = time.monotonic() + 1.5
-        while time.monotonic() < deadline:
-            status = master.GetArmStatus().arm_status
-            mode = int(status.ctrl_mode)
-            teach = int(status.teach_status)
-            arm_state = int(status.arm_status)
-            motion = int(status.motion_status)
-            mode_feed = int(status.mode_feed)
-            if mode == 0x02 and teach == 0x01:
-                break
-            time.sleep(0.05)
-        else:
-            raise RuntimeError(
-                "master failed to enter drag teaching mode: "
-                f"ctrl_mode=0x{mode:02X}, mode_feed=0x{mode_feed:02X}, "
-                f"teach_status=0x{teach:02X}, motion_status=0x{motion:02X}, "
-                f"arm_status=0x{arm_state:02X}"
-            )
-
         self.reset_intervention_tracking()
-        print(
-            "[mode] master drag teaching confirmed "
-            f"(ctrl_mode=0x{mode:02X}, teach_status=0x{teach:02X}) - FREE TO DRAG"
-        )
+        print("[mode] master input role requested; waiting for a new control frame")
 
     def disable_master_drag_mode(self):
         """Disable intervention mode: master arm becomes software-controllable follower"""
@@ -595,12 +608,19 @@ class PiperDAgger(Robot):
         # the follower untouched and simply re-assert its current target.
         self.reassert_follower_hold()
 
-        master_state = self.get_master_state()
+        master_state = self.get_master_input_state()
 
         # Exit drag teaching, then use the live pose as the first CAN target so
         # the master does not return to a stale pre-takeover command.
         master.MotionCtrl_1(0x00, 0x00, 0x02)  # Exit drag teaching
         time.sleep(0.15)
+        master.MasterSlaveConfig(
+            FOLLOWER_ROLE,
+            FEEDBACK_OFFSET,
+            CTRL_OFFSET,
+            LINKAGE_OFFSET,
+        )
+        time.sleep(0.25)
 
         self.reset_intervention_tracking()
         self._send_arm_target(
