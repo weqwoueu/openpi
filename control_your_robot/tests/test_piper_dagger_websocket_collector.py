@@ -142,6 +142,8 @@ def _make_runtime(worker=None, robot=None, collector=None, **runtime_kwargs):
         reset_settle_seconds=0,
         alignment_timeout=0.1,
         gripper_frame_fallback=True,
+        master_role_retries=0,
+        master_role_retry_interval=0.01,
         teleop_mapping=DAGGER.TeleopMapping(
             joint_sign=[1] * 6,
             joint_offset=[0] * 6,
@@ -232,6 +234,32 @@ def test_takeover_requires_new_master_control_frame(monkeypatch):
 
     with pytest.raises(RuntimeError, match="no new master control frame"):
         runtime._wait_for_master_action(object(), after_ctrl_timestamp=0.0)
+
+
+def test_takeover_retries_input_role_until_new_control_frame(monkeypatch):
+    class RetryRobot:
+        def __init__(self):
+            self.retries = 0
+
+        def retry_master_input_role(self):
+            self.retries += 1
+
+    robot = RetryRobot()
+    runtime = _make_runtime(
+        robot=robot,
+        alignment_timeout=0.1,
+        master_role_retries=2,
+        master_role_retry_interval=0.001,
+    )
+    action = (np.zeros(6), 0.5, "ctrl")
+    monkeypatch.setattr(
+        DAGGER,
+        "_read_master_ctrl_action",
+        lambda *args, **kwargs: action if robot.retries else None,
+    )
+
+    assert runtime._wait_for_master_action(object(), after_ctrl_timestamp=1.0) == action
+    assert robot.retries == 1
 
 
 def test_master_ctrl_action_uses_timestamps_and_gripper_fallback_during_switch():
@@ -628,6 +656,15 @@ def test_piper_dagger_policy_send_uses_mit_for_follower(monkeypatch):
             "teaching_friction": 1,
         }
     ]
+
+    robot.retry_master_input_role()
+    assert master.controller.master_slave_calls[-1] == (
+        piper_module.MASTER_ROLE,
+        0x00,
+        0x00,
+        0x00,
+    )
+    assert master.controller.motion_ctrl_1_calls[-1] == (0x00, 0x00, 0x01)
 
     can_bus = FakeCanBus()
 

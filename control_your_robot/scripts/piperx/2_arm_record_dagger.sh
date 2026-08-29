@@ -38,6 +38,9 @@ ALIGNMENT_TIMEOUT=5.0
 # true: use the pre-switch gripper value until the 0x159 gripper frame is ready.
 # This never allows stale joint frames to pass the takeover check.
 GRIPPER_FRAME_FALLBACK=true
+# Retry 0xFA + drag request when no new native master frame appears.
+MASTER_ROLE_RETRIES=3
+MASTER_ROLE_RETRY_INTERVAL=1.0
 
 # Ordinary pi0.5 SFT: leave empty. PiStar inference: for example positive.
 # This affects inference only. Saved raw data always uses adv_ind=none.
@@ -99,6 +102,8 @@ args=(
     --reset-settle-seconds "$RESET_SETTLE_SECONDS"
     --alignment-timeout "$ALIGNMENT_TIMEOUT"
     --gripper-frame-fallback "$GRIPPER_FRAME_FALLBACK"
+    --master-role-retries "$MASTER_ROLE_RETRIES"
+    --master-role-retry-interval "$MASTER_ROLE_RETRY_INTERVAL"
     --ema-enabled "$EMA_ENABLED"
     --ema-alpha "$EMA_ALPHA"
     --slew-enabled "$SLEW_ENABLED"

@@ -750,6 +750,8 @@ class DaggerRuntime:
         reset_settle_seconds: float,
         alignment_timeout: float,
         gripper_frame_fallback: bool,
+        master_role_retries: int,
+        master_role_retry_interval: float,
         teleop_mapping: TeleopMapping,
         filter_kwargs: dict,
         prefetch_threshold: int = 0,
@@ -776,6 +778,12 @@ class DaggerRuntime:
         )
         self.alignment_timeout = float(alignment_timeout)
         self.gripper_frame_fallback = bool(gripper_frame_fallback)
+        self.master_role_retries = int(master_role_retries)
+        self.master_role_retry_interval = float(master_role_retry_interval)
+        if self.master_role_retries < 0:
+            raise ValueError("master_role_retries must be non-negative")
+        if self.master_role_retry_interval <= 0:
+            raise ValueError("master_role_retry_interval must be positive")
         self.teleop_mapping = teleop_mapping
         self.filter_kwargs = dict(filter_kwargs)
         self.generation = 0
@@ -926,6 +934,8 @@ class DaggerRuntime:
 
     def _wait_for_master_action(self, master, *, after_ctrl_timestamp: float):
         deadline = time.monotonic() + self.alignment_timeout
+        next_retry_at = time.monotonic() + self.master_role_retry_interval
+        retries = 0
         while time.monotonic() < deadline:
             action = self._read_master_ctrl_action(
                 master,
@@ -936,16 +946,31 @@ class DaggerRuntime:
                 # current frame group time to update before taking the baseline.
                 time.sleep(0.03)
                 return self._read_master_ctrl_action(master) or action
+
+            now = time.monotonic()
+            if retries < self.master_role_retries and now >= next_retry_at:
+                retries += 1
+                print(
+                    f"[mode] no new master frame; retrying input role "
+                    f"({retries}/{self.master_role_retries})"
+                )
+                self.robot.retry_master_input_role()
+                next_retry_at = time.monotonic() + self.master_role_retry_interval
             time.sleep(0.02)
 
         try:
             ctrl = master.controller.GetArmJointCtrl()
             gripper_ctrl = master.controller.GetArmGripperCtrl()
+            arm_status = master.controller.GetArmStatus().arm_status
             readiness = (
+                f"role_retries={retries}, "
                 f"joint_hz={getattr(ctrl, 'Hz', 0):.1f}, "
                 f"joint_timestamp={getattr(ctrl, 'time_stamp', 0.0):.6f}, "
                 f"previous_timestamp={after_ctrl_timestamp:.6f}, "
-                f"gripper_hz={getattr(gripper_ctrl, 'Hz', 0):.1f}"
+                f"gripper_hz={getattr(gripper_ctrl, 'Hz', 0):.1f}, "
+                f"ctrl_mode=0x{int(arm_status.ctrl_mode):02X}, "
+                f"teach_status=0x{int(arm_status.teach_status):02X}, "
+                f"motion_status=0x{int(arm_status.motion_status):02X}"
             )
         except Exception as error:
             readiness = f"readiness query failed: {error}"
@@ -1080,6 +1105,8 @@ def _build_parser():
     parser.add_argument("--reset-settle-seconds", type=float, default=2.0)
     parser.add_argument("--alignment-timeout", type=float, default=5.0)
     parser.add_argument("--gripper-frame-fallback", type=_parse_bool, default=True)
+    parser.add_argument("--master-role-retries", type=int, default=3)
+    parser.add_argument("--master-role-retry-interval", type=float, default=1.0)
     parser.add_argument("--adv-ind", default=None, help="optional inference condition; raw dataset still stores none")
     parser.add_argument("--ema-enabled", type=_parse_bool, default=True)
     parser.add_argument("--ema-alpha", type=float, default=0.8)
@@ -1195,6 +1222,8 @@ def main():
             reset_script=CONTROL_ROOT / "scripts" / "piperx" / "2_arm_go_init.sh",
             alignment_timeout=args.alignment_timeout,
             gripper_frame_fallback=args.gripper_frame_fallback,
+            master_role_retries=args.master_role_retries,
+            master_role_retry_interval=args.master_role_retry_interval,
             teleop_mapping=TeleopMapping(
                 joint_sign=args.joint_sign,
                 joint_offset=args.joint_offset,

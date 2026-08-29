@@ -605,6 +605,21 @@ class PiperDAgger(Robot):
         print("[mode] master input role requested; waiting for a new control frame")
         return ctrl_timestamp_before_switch
 
+    def retry_master_input_role(self):
+        """Re-issue the idempotent PiperX input-role transition."""
+        master = self.controllers["arm"]["right_arm"].controller
+        if master is None:
+            raise RuntimeError("Master controller is not initialized")
+
+        master.MasterSlaveConfig(
+            MASTER_ROLE,
+            FEEDBACK_OFFSET,
+            CTRL_OFFSET,
+            LINKAGE_OFFSET,
+        )
+        time.sleep(0.2)
+        master.MotionCtrl_1(0x00, 0x00, 0x01)
+
     def disable_master_drag_mode(self):
         """Disable intervention mode: master arm becomes software-controllable follower"""
         master = self.controllers["arm"]["right_arm"].controller
