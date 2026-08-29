@@ -41,6 +41,12 @@ GRIPPER_FRAME_FALLBACK=true
 # Retry 0xFA + drag request when no new native master frame appears.
 MASTER_ROLE_RETRIES=3
 MASTER_ROLE_RETRY_INTERVAL=1.0
+# Before 0xFA, move the master to the follower's frozen feedback pose.
+TAKEOVER_ALIGN_ENABLED=true
+TAKEOVER_ALIGN_FPS=50
+TAKEOVER_ALIGN_MAX_JOINT_STEP=0.01
+TAKEOVER_ALIGN_SETTLE_SECONDS=0.5
+TAKEOVER_ALIGN_TIMEOUT=8.0
 
 # Ordinary pi0.5 SFT: leave empty. PiStar inference: for example positive.
 # This affects inference only. Saved raw data always uses adv_ind=none.
@@ -104,6 +110,11 @@ args=(
     --gripper-frame-fallback "$GRIPPER_FRAME_FALLBACK"
     --master-role-retries "$MASTER_ROLE_RETRIES"
     --master-role-retry-interval "$MASTER_ROLE_RETRY_INTERVAL"
+    --takeover-align-enabled "$TAKEOVER_ALIGN_ENABLED"
+    --takeover-align-fps "$TAKEOVER_ALIGN_FPS"
+    --takeover-align-max-joint-step "$TAKEOVER_ALIGN_MAX_JOINT_STEP"
+    --takeover-align-settle-seconds "$TAKEOVER_ALIGN_SETTLE_SECONDS"
+    --takeover-align-timeout "$TAKEOVER_ALIGN_TIMEOUT"
     --ema-enabled "$EMA_ENABLED"
     --ema-alpha "$EMA_ALPHA"
     --slew-enabled "$SLEW_ENABLED"

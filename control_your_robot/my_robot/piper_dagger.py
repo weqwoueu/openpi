@@ -1,4 +1,5 @@
 from pathlib import Path
+import math
 import subprocess
 import sys
 import time
@@ -522,7 +523,170 @@ class PiperDAgger(Robot):
         gripper = int(target_gripper * 70 * 1000)
         master_controller.GripperCtrl(gripper, self._master_gripper_effort, 0x01, 0)
 
-    def enable_master_drag_mode(self):
+    def align_master_to_follower(
+        self,
+        follower_state,
+        *,
+        fps=50.0,
+        max_joint_step=0.01,
+        settle_seconds=0.5,
+        timeout=8.0,
+    ):
+        """Move the master to the follower's frozen feedback pose before takeover."""
+        fps = float(fps)
+        max_joint_step = float(max_joint_step)
+        settle_seconds = float(settle_seconds)
+        timeout = float(timeout)
+        if fps <= 0 or max_joint_step <= 0 or timeout <= 0 or settle_seconds < 0:
+            raise ValueError("invalid master/follower takeover alignment settings")
+
+        master = self.controllers["arm"]["right_arm"].controller
+        if master is None:
+            raise RuntimeError("Master controller is not initialized")
+        alignment_started = time.monotonic()
+        deadline = alignment_started + timeout
+
+        target_joint = np.asarray(follower_state["joint"], dtype=float).reshape(-1)
+        target_gripper = float(follower_state["gripper"])
+        if target_joint.shape != (6,):
+            raise RuntimeError("takeover alignment requires 6D master/follower joints")
+        if not np.all(np.isfinite(np.concatenate([target_joint, [target_gripper]]))):
+            raise RuntimeError("takeover alignment received non-finite feedback")
+
+        period = 1.0 / fps
+        max_gripper_step = 0.02
+
+        # Cancel the master's outstanding policy target at its live pose before
+        # changing roles. Re-read feedback after 0xFC settles: the arm may still
+        # move briefly while the role command is taking effect.
+        live_state = self.get_master_state()
+        live_joint = np.asarray(live_state["joint"], dtype=float).reshape(-1)
+        live_gripper = float(live_state["gripper"])
+        if live_joint.shape != (6,) or not np.all(
+            np.isfinite(np.concatenate([live_joint, [live_gripper]]))
+        ):
+            raise RuntimeError("takeover alignment received invalid master feedback")
+        self._send_arm_target(
+            master,
+            {"joint": live_joint, "gripper": live_gripper},
+            speed_percent=15,
+            gripper_effort=self._master_gripper_effort,
+        )
+        master.MotionCtrl_1(0x00, 0x00, 0x00)
+        master.MasterSlaveConfig(
+            FOLLOWER_ROLE,
+            FEEDBACK_OFFSET,
+            CTRL_OFFSET,
+            LINKAGE_OFFSET,
+        )
+        time.sleep(0.5)
+
+        start_state = self.get_master_state()
+        start_joint = np.asarray(start_state["joint"], dtype=float).reshape(-1)
+        start_gripper = float(start_state["gripper"])
+        if start_joint.shape != (6,) or not np.all(
+            np.isfinite(np.concatenate([start_joint, [start_gripper]]))
+        ):
+            raise RuntimeError("takeover alignment received invalid post-settle feedback")
+
+        joint_delta = target_joint - start_joint
+        gripper_delta = target_gripper - start_gripper
+        steps = max(
+            1,
+            math.ceil(float(np.max(np.abs(joint_delta))) / max_joint_step),
+            math.ceil(abs(gripper_delta) / max_gripper_step),
+        )
+        stable_reads_required = 3
+        minimum_duration = (
+            0.5
+            + steps * period
+            + settle_seconds
+            + (stable_reads_required + 1) * period
+        )
+        if minimum_duration > timeout:
+            raise TimeoutError(
+                "master/follower takeover alignment exceeds timeout before motion: "
+                f"steps={steps}, estimated={minimum_duration:.2f}s, timeout={timeout:.2f}s"
+            )
+
+        print(
+            "[align] moving master to follower feedback pose: "
+            f"max_joint_delta={np.max(np.abs(joint_delta)):.4f}rad, steps={steps}"
+        )
+        next_tick = time.monotonic()
+
+        for step in range(1, steps + 1):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("master/follower takeover alignment timed out during ramp")
+            ratio = step / steps
+            self._send_arm_target(
+                master,
+                {
+                    "joint": start_joint + joint_delta * ratio,
+                    "gripper": start_gripper + gripper_delta * ratio,
+                },
+                speed_percent=60 if step == 1 else None,
+                gripper_effort=self._master_gripper_effort,
+            )
+            next_tick += period
+            remaining = next_tick - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+
+        if settle_seconds > 0:
+            time.sleep(settle_seconds)
+
+        joint_tolerance = 0.03
+        gripper_tolerance = 0.15
+        stable_delta = min(0.005, max_joint_step)
+        stable_reads = 0
+        previous_joint = None
+        previous_gripper = None
+        last_joint_error = float("inf")
+        last_gripper_error = float("inf")
+        while time.monotonic() < deadline:
+            actual = self.get_master_state()
+            actual_joint = np.asarray(actual["joint"], dtype=float).reshape(-1)
+            actual_gripper = float(actual["gripper"])
+            if actual_joint.shape != (6,) or not np.all(
+                np.isfinite(np.concatenate([actual_joint, [actual_gripper]]))
+            ):
+                raise RuntimeError("master feedback became invalid during takeover alignment")
+
+            last_joint_error = float(np.max(np.abs(actual_joint - target_joint)))
+            last_gripper_error = abs(actual_gripper - target_gripper)
+            is_stable = (
+                previous_joint is not None
+                and previous_gripper is not None
+                and float(np.max(np.abs(actual_joint - previous_joint))) <= stable_delta
+                and abs(actual_gripper - previous_gripper) <= max_gripper_step
+            )
+            if (
+                last_joint_error <= joint_tolerance
+                and last_gripper_error <= gripper_tolerance
+                and is_stable
+            ):
+                stable_reads += 1
+                if stable_reads >= stable_reads_required:
+                    print(
+                        "[align] master/follower alignment ready: "
+                        f"joint_error={last_joint_error:.4f}rad, "
+                        f"gripper_error={last_gripper_error:.4f}"
+                    )
+                    return
+            else:
+                stable_reads = 0
+            previous_joint = actual_joint
+            previous_gripper = actual_gripper
+            time.sleep(period)
+
+        raise TimeoutError(
+            "master did not reach follower pose before takeover: "
+            f"joint_error={last_joint_error:.4f}rad, "
+            f"gripper_error={last_gripper_error:.4f}"
+        )
+
+    def enable_master_drag_mode(self, *, master_already_aligned=False):
         """Enable intervention mode: master arm becomes draggable teaching arm"""
         master = self.controllers["arm"]["right_arm"].controller
         if master is None:
@@ -538,17 +702,16 @@ class PiperDAgger(Robot):
         master.MotionCtrl_1(0x00, 0x00, 0x00)
         time.sleep(0.1)
 
-        # Stop the master's last autonomous MOVE_J at its live feedback pose.
-        # A still-pending policy target can keep ctrl_mode in CAN control even
-        # after the drag-teach request has been accepted.
-        master_state = self.get_master_state()
-        self._send_arm_target(
-            master,
-            master_state,
-            speed_percent=15,
-            gripper_effort=self._master_gripper_effort,
-        )
-        time.sleep(0.1)
+        if not master_already_aligned:
+            # Stop the master's last autonomous MOVE_J at its live feedback pose.
+            master_state = self.get_master_state()
+            self._send_arm_target(
+                master,
+                master_state,
+                speed_percent=15,
+                gripper_effort=self._master_gripper_effort,
+            )
+            time.sleep(0.1)
 
         settle_deadline = time.monotonic() + 2.0
         mode = teach = arm_state = motion = mode_feed = None
@@ -568,7 +731,7 @@ class PiperDAgger(Robot):
                 break
             time.sleep(0.05)
         else:
-            raise RuntimeError(
+            raise TimeoutError(
                 "master did not settle before drag teaching: "
                 f"ctrl_mode=0x{mode:02X}, mode_feed=0x{mode_feed:02X}, "
                 f"teach_status=0x{teach:02X}, motion_status=0x{motion:02X}, "

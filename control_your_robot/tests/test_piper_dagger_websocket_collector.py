@@ -45,6 +45,21 @@ def test_space_switches_to_expert_only_once_per_episode():
     assert session.state is DAGGER.SessionState.INTERVENTION
 
 
+def test_failed_takeover_returns_to_autonomous_and_allows_retry():
+    session = DAGGER.DaggerSession(num_episodes=-1)
+    session.handle(DAGGER.KeyEvent.ENTER)
+    session.handle(DAGGER.KeyEvent.SPACE)
+
+    session.takeover_failed()
+
+    assert session.state is DAGGER.SessionState.AUTONOMOUS
+    assert not session.intervention_used
+    assert session.handle(DAGGER.KeyEvent.SPACE) is DAGGER.SessionCommand.START_TAKEOVER
+    assert session.handle(DAGGER.KeyEvent.SPACE) is DAGGER.SessionCommand.NONE
+    session.takeover_ready()
+    assert session.state is DAGGER.SessionState.INTERVENTION
+
+
 def test_label_requires_arrow_then_enter_and_save_ignores_keys():
     session = DAGGER.DaggerSession(num_episodes=2)
     session.handle(DAGGER.KeyEvent.ENTER)
@@ -144,6 +159,11 @@ def _make_runtime(worker=None, robot=None, collector=None, **runtime_kwargs):
         gripper_frame_fallback=True,
         master_role_retries=0,
         master_role_retry_interval=0.01,
+        takeover_align_enabled=False,
+        takeover_align_fps=50,
+        takeover_align_max_joint_step=0.01,
+        takeover_align_settle_seconds=0.5,
+        takeover_align_timeout=8.0,
         teleop_mapping=DAGGER.TeleopMapping(
             joint_sign=[1] * 6,
             joint_offset=[0] * 6,
@@ -262,6 +282,99 @@ def test_takeover_retries_input_role_until_new_control_frame(monkeypatch):
     assert robot.retries == 1
 
 
+def test_takeover_only_wraps_expected_transition_timeouts():
+    class TransitionRobot(FakeRobot):
+        def __init__(self, alignment_error):
+            super().__init__()
+            self.alignment_error = alignment_error
+            self.controllers = {
+                "arm": {
+                    "left_arm": types.SimpleNamespace(controller=object()),
+                    "right_arm": types.SimpleNamespace(controller=object()),
+                }
+            }
+
+        def set_policy_enabled(self, _enabled):
+            pass
+
+        def get_master_state(self):
+            return {"joint": np.zeros(6), "gripper": 0.0}
+
+        def get_follower_state(self):
+            return {"joint": np.zeros(6), "gripper": 0.0}
+
+        def hold_follower_position(self):
+            pass
+
+        def align_master_to_follower(self, *_args, **_kwargs):
+            raise self.alignment_error
+
+    timeout_runtime = _make_runtime(
+        robot=TransitionRobot(TimeoutError("alignment timed out")),
+        takeover_align_enabled=True,
+    )
+    with pytest.raises(DAGGER.TakeoverTransitionError, match="alignment timed out"):
+        timeout_runtime.begin_takeover(1)
+
+    can_runtime = _make_runtime(
+        robot=TransitionRobot(RuntimeError("master CAN send failed")),
+        takeover_align_enabled=True,
+    )
+    with pytest.raises(RuntimeError, match="master CAN send failed") as error:
+        can_runtime.begin_takeover(1)
+    assert not isinstance(error.value, DAGGER.TakeoverTransitionError)
+
+
+def test_failed_takeover_recovery_preserves_episode_and_restarts_policy(monkeypatch):
+    class RecoveryRobot(FakeRobot):
+        def __init__(self):
+            super().__init__()
+            self.policy_enabled = False
+            self.holds = 0
+            self.restores = 0
+            self.controllers = {
+                "arm": {
+                    "left_arm": types.SimpleNamespace(controller=object()),
+                    "right_arm": types.SimpleNamespace(controller=object()),
+                }
+            }
+
+        def set_policy_enabled(self, enabled):
+            self.policy_enabled = bool(enabled)
+
+        def hold_follower_position(self):
+            self.holds += 1
+
+        def disable_master_drag_mode(self):
+            self.restores += 1
+
+    robot = RecoveryRobot()
+    worker = FakeInferenceWorker()
+    collector = FakeCollector()
+    runtime = _make_runtime(robot=robot, worker=worker, collector=collector)
+    runtime.generation = 4
+    runtime.step_count = 123
+    runtime._master_drag_enabled = True
+    runtime._actions.append(np.ones(7))
+    runtime._teleop_errors.put(RuntimeError("stale teleop error"))
+    monkeypatch.setattr(
+        DAGGER,
+        "make_policy_observation",
+        lambda *args, **kwargs: {"observation": "current"},
+    )
+
+    runtime.recover_failed_takeover(4)
+
+    assert robot.restores == 1
+    assert robot.policy_enabled
+    assert runtime.step_count == 123
+    assert collector.cleared == 0
+    assert not runtime._actions
+    assert runtime._teleop_errors.empty()
+    assert len(worker.requests) == 1
+    assert worker.requests[0].generation == 4
+
+
 def test_master_ctrl_action_uses_timestamps_and_gripper_fallback_during_switch():
     joint_ctrl = types.SimpleNamespace(
         joint_1=0,
@@ -310,6 +423,16 @@ def test_master_ctrl_action_still_rejects_stale_joint_frame_with_gripper_fallbac
         after_timestamp=1.0,
         fallback_gripper=0.4,
     ) is None
+
+
+def test_master_ctrl_action_propagates_sdk_read_errors():
+    controller = types.SimpleNamespace(
+        GetArmJointCtrl=lambda: (_ for _ in ()).throw(RuntimeError("CAN read failed")),
+    )
+    master = types.SimpleNamespace(controller=controller)
+
+    with pytest.raises(RuntimeError, match="CAN read failed"):
+        DAGGER._read_master_ctrl_action(master, fallback_gripper=0.4)
 
 
 def test_reset_runs_existing_two_arm_init_script(tmp_path, monkeypatch):
@@ -637,6 +760,72 @@ def test_piper_dagger_policy_send_uses_mit_for_follower(monkeypatch):
     )
 
     monkeypatch.setattr(piper_module.time, "sleep", lambda _seconds: None)
+    aligned_state = {"joint": np.zeros(6), "gripper": 0.0}
+    alignment_commands = []
+    original_send_arm_target = robot._send_arm_target
+
+    def track_alignment(_controller, move_data, **_kwargs):
+        aligned_state["joint"] = np.asarray(move_data["joint"], dtype=float).copy()
+        aligned_state["gripper"] = float(move_data["gripper"])
+        alignment_commands.append(aligned_state["joint"].copy())
+
+    robot.get_master_state = lambda: aligned_state
+    robot._send_arm_target = track_alignment
+    follower_target = {
+        "joint": np.array([0.05, -0.04, 0.03, -0.02, 0.01, 0.0]),
+        "gripper": 0.08,
+    }
+    robot.align_master_to_follower(
+        follower_target,
+        fps=50,
+        max_joint_step=0.01,
+        settle_seconds=0,
+        timeout=1.0,
+    )
+
+    command_steps = np.diff(np.vstack([np.zeros(6), alignment_commands]), axis=0)
+    assert np.max(np.abs(command_steps)) <= 0.010001
+    np.testing.assert_allclose(alignment_commands[-1], follower_target["joint"])
+    assert aligned_state["gripper"] == follower_target["gripper"]
+
+    aligned_state["joint"] = np.full(6, 0.2)
+    aligned_state["gripper"] = 0.0
+    alignment_commands.clear()
+    role_settled = False
+
+    def move_during_role_settle(seconds):
+        nonlocal role_settled
+        if seconds == 0.5 and not role_settled:
+            aligned_state["joint"] = np.full(6, 0.3)
+            role_settled = True
+
+    monkeypatch.setattr(piper_module.time, "sleep", move_during_role_settle)
+    robot.align_master_to_follower(
+        {"joint": np.zeros(6), "gripper": 0.0},
+        fps=50,
+        max_joint_step=0.01,
+        settle_seconds=0,
+        timeout=2.0,
+    )
+    assert role_settled
+    np.testing.assert_allclose(alignment_commands[0], np.full(6, 0.2))
+    assert np.max(np.abs(alignment_commands[1] - np.full(6, 0.3))) <= 0.010001
+
+    monkeypatch.setattr(piper_module.time, "sleep", lambda _seconds: None)
+    alignment_commands.clear()
+    with pytest.raises(TimeoutError, match="exceeds timeout before motion"):
+        robot.align_master_to_follower(
+            {"joint": np.ones(6), "gripper": 1.0},
+            fps=50,
+            max_joint_step=0.01,
+            settle_seconds=0,
+            timeout=0.1,
+        )
+    assert len(alignment_commands) == 1
+
+    robot._send_arm_target = original_send_arm_target
+    master.controller.master_slave_calls.clear()
+    master.controller.motion_ctrl_1_calls.clear()
     robot.reset_intervention_tracking = lambda: None
     robot.get_master_state = lambda: {
         "joint": np.arange(6, dtype=float) / 10,

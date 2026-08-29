@@ -72,6 +72,10 @@ class SessionCommand(Enum):
     SAVE_EPISODE = auto()
 
 
+class TakeoverTransitionError(RuntimeError):
+    """Expected failure while aligning or switching the master to expert input."""
+
+
 class KeyDecoder:
     """Decode Enter, Space, and split ANSI left/right arrow sequences."""
 
@@ -227,6 +231,12 @@ class DaggerSession:
         if self.state is not SessionState.SWITCHING_TO_EXPERT:
             raise RuntimeError(f"cannot complete takeover from {self.state.name}")
         self.state = SessionState.INTERVENTION
+
+    def takeover_failed(self):
+        if self.state is not SessionState.SWITCHING_TO_EXPERT:
+            raise RuntimeError(f"cannot fail takeover from {self.state.name}")
+        self.state = SessionState.AUTONOMOUS
+        self.intervention_used = False
 
     def finish_active_episode(self) -> SessionCommand:
         if self.state not in (
@@ -645,35 +655,32 @@ def _read_master_ctrl_action(
     after_timestamp: float | None = None,
     fallback_gripper: float | None = None,
 ):
-    try:
-        ctrl = master.controller.GetArmJointCtrl()
-        ctrl_timestamp = float(getattr(ctrl, "time_stamp", 0.0))
-        if ctrl_timestamp <= 0:
-            return None
-        if after_timestamp is not None and ctrl_timestamp <= after_timestamp:
-            return None
-        joints = ctrl.joint_ctrl
-        joint = np.asarray(
-            [
-                joints.joint_1,
-                joints.joint_2,
-                joints.joint_3,
-                joints.joint_4,
-                joints.joint_5,
-                joints.joint_6,
-            ],
-            dtype=float,
-        ) / 57295.7795
-        gripper_ctrl = master.controller.GetArmGripperCtrl()
-        if getattr(gripper_ctrl, "Hz", 0) > 0:
-            gripper = float(gripper_ctrl.gripper_ctrl.grippers_angle) / (70 * 1000)
-        elif fallback_gripper is not None:
-            gripper = float(fallback_gripper)
-        else:
-            return None
-        return joint, gripper, "ctrl"
-    except Exception:
+    ctrl = master.controller.GetArmJointCtrl()
+    ctrl_timestamp = float(getattr(ctrl, "time_stamp", 0.0))
+    if ctrl_timestamp <= 0:
         return None
+    if after_timestamp is not None and ctrl_timestamp <= after_timestamp:
+        return None
+    joints = ctrl.joint_ctrl
+    joint = np.asarray(
+        [
+            joints.joint_1,
+            joints.joint_2,
+            joints.joint_3,
+            joints.joint_4,
+            joints.joint_5,
+            joints.joint_6,
+        ],
+        dtype=float,
+    ) / 57295.7795
+    gripper_ctrl = master.controller.GetArmGripperCtrl()
+    if getattr(gripper_ctrl, "Hz", 0) > 0:
+        gripper = float(gripper_ctrl.gripper_ctrl.grippers_angle) / (70 * 1000)
+    elif fallback_gripper is not None:
+        gripper = float(fallback_gripper)
+    else:
+        return None
+    return joint, gripper, "ctrl"
 
 
 def _read_master_feedback_action(master):
@@ -752,6 +759,11 @@ class DaggerRuntime:
         gripper_frame_fallback: bool,
         master_role_retries: int,
         master_role_retry_interval: float,
+        takeover_align_enabled: bool,
+        takeover_align_fps: float,
+        takeover_align_max_joint_step: float,
+        takeover_align_settle_seconds: float,
+        takeover_align_timeout: float,
         teleop_mapping: TeleopMapping,
         filter_kwargs: dict,
         prefetch_threshold: int = 0,
@@ -784,6 +796,11 @@ class DaggerRuntime:
             raise ValueError("master_role_retries must be non-negative")
         if self.master_role_retry_interval <= 0:
             raise ValueError("master_role_retry_interval must be positive")
+        self.takeover_align_enabled = bool(takeover_align_enabled)
+        self.takeover_align_fps = float(takeover_align_fps)
+        self.takeover_align_max_joint_step = float(takeover_align_max_joint_step)
+        self.takeover_align_settle_seconds = float(takeover_align_settle_seconds)
+        self.takeover_align_timeout = float(takeover_align_timeout)
         self.teleop_mapping = teleop_mapping
         self.filter_kwargs = dict(filter_kwargs)
         self.generation = 0
@@ -895,9 +912,27 @@ class DaggerRuntime:
         self.robot.set_policy_enabled(False)
         master = self.robot.controllers["arm"]["right_arm"]
         self._last_master_gripper = float(self.robot.get_master_state()["gripper"])
+        follower_state = self.robot.get_follower_state()
         self.robot.hold_follower_position()
-        previous_ctrl_timestamp = self.robot.enable_master_drag_mode()
+        # Mark the transition as active before any mode command so a failed
+        # alignment or role switch is restored through the same cleanup path.
         self._master_drag_enabled = True
+        try:
+            if self.takeover_align_enabled:
+                self.robot.align_master_to_follower(
+                    follower_state,
+                    fps=self.takeover_align_fps,
+                    max_joint_step=self.takeover_align_max_joint_step,
+                    settle_seconds=self.takeover_align_settle_seconds,
+                    timeout=self.takeover_align_timeout,
+                )
+            previous_ctrl_timestamp = self.robot.enable_master_drag_mode(
+                master_already_aligned=self.takeover_align_enabled
+            )
+        except TimeoutError as error:
+            raise TakeoverTransitionError(
+                f"master alignment or input-role transition failed: {error}"
+            ) from error
 
         master_raw = self._wait_for_master_action(
             master, after_ctrl_timestamp=previous_ctrl_timestamp
@@ -974,7 +1009,7 @@ class DaggerRuntime:
             )
         except Exception as error:
             readiness = f"readiness query failed: {error}"
-        raise RuntimeError(
+        raise TakeoverTransitionError(
             "no new master control frame after switching to input role; "
             + readiness
         )
@@ -1047,6 +1082,21 @@ class DaggerRuntime:
         self._invalidate_policy(generation)
         self.stop_active_control(restore_master=True)
 
+    def recover_failed_takeover(self, generation: int):
+        self.stop_active_control(restore_master=True)
+        self._invalidate_policy(generation)
+        while True:
+            try:
+                self._teleop_errors.get_nowait()
+            except queue.Empty:
+                break
+        self.robot.set_policy_enabled(True)
+        self._latest_observation = make_policy_observation(
+            self.robot.get(), self.prompt, self.inference_adv_ind
+        )
+        self._submit_inference()
+        self._next_sample_at = time.monotonic()
+
 
 def _cleanup_robot(robot):
     for group in getattr(robot, "sensors", {}).values():
@@ -1107,6 +1157,11 @@ def _build_parser():
     parser.add_argument("--gripper-frame-fallback", type=_parse_bool, default=True)
     parser.add_argument("--master-role-retries", type=int, default=3)
     parser.add_argument("--master-role-retry-interval", type=float, default=1.0)
+    parser.add_argument("--takeover-align-enabled", type=_parse_bool, default=True)
+    parser.add_argument("--takeover-align-fps", type=float, default=50.0)
+    parser.add_argument("--takeover-align-max-joint-step", type=float, default=0.01)
+    parser.add_argument("--takeover-align-settle-seconds", type=float, default=0.5)
+    parser.add_argument("--takeover-align-timeout", type=float, default=8.0)
     parser.add_argument("--adv-ind", default=None, help="optional inference condition; raw dataset still stores none")
     parser.add_argument("--ema-enabled", type=_parse_bool, default=True)
     parser.add_argument("--ema-alpha", type=float, default=0.8)
@@ -1133,6 +1188,13 @@ def main():
         raise SystemExit("--chunk-size must be positive")
     if not 0 <= args.prefetch_threshold < args.chunk_size:
         raise SystemExit("--prefetch-threshold must be in [0, chunk-size)")
+    if args.takeover_align_enabled and (
+        args.takeover_align_fps <= 0
+        or args.takeover_align_max_joint_step <= 0
+        or args.takeover_align_settle_seconds < 0
+        or args.takeover_align_timeout <= 0
+    ):
+        raise SystemExit("invalid takeover alignment settings")
     if args.num_episode == 0 or args.num_episode < -1:
         raise SystemExit("--num-episode must be -1 or a positive integer")
     if args.max_step == 0 or args.max_step < -1:
@@ -1224,6 +1286,11 @@ def main():
             gripper_frame_fallback=args.gripper_frame_fallback,
             master_role_retries=args.master_role_retries,
             master_role_retry_interval=args.master_role_retry_interval,
+            takeover_align_enabled=args.takeover_align_enabled,
+            takeover_align_fps=args.takeover_align_fps,
+            takeover_align_max_joint_step=args.takeover_align_max_joint_step,
+            takeover_align_settle_seconds=args.takeover_align_settle_seconds,
+            takeover_align_timeout=args.takeover_align_timeout,
             teleop_mapping=TeleopMapping(
                 joint_sign=args.joint_sign,
                 joint_offset=args.joint_offset,
@@ -1262,10 +1329,24 @@ def main():
             elif command is SessionCommand.START_TAKEOVER:
                 listener.pause()
                 print("\nSwitching to expert: invalidating policy chunk and aligning master...")
-                runtime.begin_takeover(session.generation)
-                session.takeover_ready()
-                print("TAKEOVER READY: expert controls follower; Space is now disabled; Enter ends episode.")
-                listener.resume()
+                try:
+                    runtime.begin_takeover(session.generation)
+                except TakeoverTransitionError as error:
+                    session.takeover_failed()
+                    runtime.recover_failed_takeover(session.generation)
+                    print(f"TAKEOVER FAILED: {error}")
+                    print(
+                        "AUTONOMOUS RESUMED: current episode is preserved; "
+                        "Space can retry expert takeover."
+                    )
+                else:
+                    session.takeover_ready()
+                    print(
+                        "TAKEOVER READY: expert controls follower; "
+                        "Space is now disabled; Enter ends episode."
+                    )
+                finally:
+                    listener.resume()
             elif command is SessionCommand.STOP_EPISODE:
                 listener.pause()
                 runtime.stop_episode(session.generation)
