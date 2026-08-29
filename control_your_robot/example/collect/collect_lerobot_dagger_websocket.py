@@ -639,12 +639,18 @@ def save_dagger_episode(collector, success: bool, tracker: DaggerEpisodeTracker 
     return True
 
 
-def _read_master_ctrl_action(master, *, after_timestamp: float | None = None):
+def _read_master_ctrl_action(
+    master,
+    *,
+    after_timestamp: float | None = None,
+    fallback_gripper: float | None = None,
+):
     try:
         ctrl = master.controller.GetArmJointCtrl()
-        if getattr(ctrl, "Hz", 0) <= 0:
+        ctrl_timestamp = float(getattr(ctrl, "time_stamp", 0.0))
+        if ctrl_timestamp <= 0:
             return None
-        if after_timestamp is not None and getattr(ctrl, "time_stamp", 0.0) <= after_timestamp:
+        if after_timestamp is not None and ctrl_timestamp <= after_timestamp:
             return None
         joints = ctrl.joint_ctrl
         joint = np.asarray(
@@ -659,9 +665,12 @@ def _read_master_ctrl_action(master, *, after_timestamp: float | None = None):
             dtype=float,
         ) / 57295.7795
         gripper_ctrl = master.controller.GetArmGripperCtrl()
-        if getattr(gripper_ctrl, "Hz", 0) <= 0:
+        if getattr(gripper_ctrl, "Hz", 0) > 0:
+            gripper = float(gripper_ctrl.gripper_ctrl.grippers_angle) / (70 * 1000)
+        elif fallback_gripper is not None:
+            gripper = float(fallback_gripper)
+        else:
             return None
-        gripper = float(gripper_ctrl.gripper_ctrl.grippers_angle) / (70 * 1000)
         return joint, gripper, "ctrl"
     except Exception:
         return None
@@ -740,10 +749,11 @@ class DaggerRuntime:
         chunk_size: int,
         reset_settle_seconds: float,
         alignment_timeout: float,
-        feedback_fallback: bool,
+        gripper_frame_fallback: bool,
         teleop_mapping: TeleopMapping,
         filter_kwargs: dict,
         prefetch_threshold: int = 0,
+        async_prefetch_enabled: bool = True,
         reset_script=None,
     ):
         self.robot = robot
@@ -755,6 +765,7 @@ class DaggerRuntime:
         self.teleop_fps = float(teleop_fps)
         self.chunk_size = int(chunk_size)
         self.prefetch_threshold = int(prefetch_threshold)
+        self.async_prefetch_enabled = bool(async_prefetch_enabled)
         if not 0 <= self.prefetch_threshold < self.chunk_size:
             raise ValueError("prefetch_threshold must be in [0, chunk_size)")
         self.reset_settle_seconds = float(reset_settle_seconds)
@@ -764,7 +775,7 @@ class DaggerRuntime:
             else CONTROL_ROOT / "scripts" / "piperx" / "2_arm_go_init.sh"
         )
         self.alignment_timeout = float(alignment_timeout)
-        self.feedback_fallback = bool(feedback_fallback)
+        self.gripper_frame_fallback = bool(gripper_frame_fallback)
         self.teleop_mapping = teleop_mapping
         self.filter_kwargs = dict(filter_kwargs)
         self.generation = 0
@@ -777,6 +788,7 @@ class DaggerRuntime:
         self._teleop_loop = None
         self._teleop_errors: queue.Queue[BaseException] = queue.Queue(maxsize=1)
         self._master_drag_enabled = False
+        self._last_master_gripper = None
 
     def start_episode(self, generation: int):
         self.stop_active_control(restore_master=True)
@@ -862,7 +874,10 @@ class DaggerRuntime:
             robot_data, self.prompt, self.inference_adv_ind
         )
         self.step_count += 1
-        if len(self._actions) <= self.prefetch_threshold:
+        if not self._actions or (
+            self.async_prefetch_enabled
+            and len(self._actions) <= self.prefetch_threshold
+        ):
             self._submit_inference()
         self._advance_sample_clock(now)
         return True
@@ -871,10 +886,9 @@ class DaggerRuntime:
         self._invalidate_policy(generation)
         self.robot.set_policy_enabled(False)
         master = self.robot.controllers["arm"]["right_arm"]
-        previous_ctrl = master.controller.GetArmJointCtrl()
-        previous_ctrl_timestamp = float(getattr(previous_ctrl, "time_stamp", 0.0))
+        self._last_master_gripper = float(self.robot.get_master_state()["gripper"])
         self.robot.hold_follower_position()
-        self.robot.enable_master_drag_mode()
+        previous_ctrl_timestamp = self.robot.enable_master_drag_mode()
         self._master_drag_enabled = True
 
         master_raw = self._wait_for_master_action(
@@ -913,19 +927,49 @@ class DaggerRuntime:
     def _wait_for_master_action(self, master, *, after_ctrl_timestamp: float):
         deadline = time.monotonic() + self.alignment_timeout
         while time.monotonic() < deadline:
-            action = _read_master_ctrl_action(master, after_timestamp=after_ctrl_timestamp)
+            action = self._read_master_ctrl_action(
+                master,
+                after_timestamp=after_ctrl_timestamp,
+            )
             if action is not None:
-                return action
+                # Joint pairs arrive in three CAN frames. Give the rest of the
+                # current frame group time to update before taking the baseline.
+                time.sleep(0.03)
+                return self._read_master_ctrl_action(master) or action
             time.sleep(0.02)
+
+        try:
+            ctrl = master.controller.GetArmJointCtrl()
+            gripper_ctrl = master.controller.GetArmGripperCtrl()
+            readiness = (
+                f"joint_hz={getattr(ctrl, 'Hz', 0):.1f}, "
+                f"joint_timestamp={getattr(ctrl, 'time_stamp', 0.0):.6f}, "
+                f"previous_timestamp={after_ctrl_timestamp:.6f}, "
+                f"gripper_hz={getattr(gripper_ctrl, 'Hz', 0):.1f}"
+            )
+        except Exception as error:
+            readiness = f"readiness query failed: {error}"
         raise RuntimeError(
             "no new master control frame after switching to input role; "
-            "feedback fallback is not valid for PiperX native master mode"
+            + readiness
         )
+
+    def _read_master_ctrl_action(self, master, *, after_timestamp: float | None = None):
+        action = _read_master_ctrl_action(
+            master,
+            after_timestamp=after_timestamp,
+            fallback_gripper=(
+                self._last_master_gripper if self.gripper_frame_fallback else None
+            ),
+        )
+        if action is not None:
+            self._last_master_gripper = float(action[1])
+        return action
 
     def _read_aligned_master_action(self, master):
         if self.teleop_mapping.source == "feedback":
             return _read_master_feedback_action(master)
-        return _read_master_ctrl_action(master)
+        return self._read_master_ctrl_action(master)
 
     def tick_intervention(self):
         try:
@@ -1020,6 +1064,7 @@ def _build_parser():
     parser.add_argument("--sample-fps", type=float, default=30.0)
     parser.add_argument("--teleop-fps", type=float, default=60.0)
     parser.add_argument("--chunk-size", type=int, default=10)
+    parser.add_argument("--async-prefetch-enabled", type=_parse_bool, default=True)
     parser.add_argument(
         "--prefetch-threshold",
         type=int,
@@ -1033,8 +1078,8 @@ def _build_parser():
     parser.add_argument("--target-intervention-success", type=int, default=-1)
     parser.add_argument("--target-intervention-failure", type=int, default=-1)
     parser.add_argument("--reset-settle-seconds", type=float, default=2.0)
-    parser.add_argument("--alignment-timeout", type=float, default=2.0)
-    parser.add_argument("--feedback-fallback", type=_parse_bool, default=False)
+    parser.add_argument("--alignment-timeout", type=float, default=5.0)
+    parser.add_argument("--gripper-frame-fallback", type=_parse_bool, default=True)
     parser.add_argument("--adv-ind", default=None, help="optional inference condition; raw dataset still stores none")
     parser.add_argument("--ema-enabled", type=_parse_bool, default=True)
     parser.add_argument("--ema-alpha", type=float, default=0.8)
@@ -1144,11 +1189,12 @@ def main():
             sample_fps=args.sample_fps,
             teleop_fps=args.teleop_fps,
             chunk_size=args.chunk_size,
+            async_prefetch_enabled=args.async_prefetch_enabled,
             prefetch_threshold=args.prefetch_threshold,
             reset_settle_seconds=args.reset_settle_seconds,
             reset_script=CONTROL_ROOT / "scripts" / "piperx" / "2_arm_go_init.sh",
             alignment_timeout=args.alignment_timeout,
-            feedback_fallback=args.feedback_fallback,
+            gripper_frame_fallback=args.gripper_frame_fallback,
             teleop_mapping=TeleopMapping(
                 joint_sign=args.joint_sign,
                 joint_offset=args.joint_offset,

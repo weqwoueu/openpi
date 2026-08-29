@@ -141,7 +141,7 @@ def _make_runtime(worker=None, robot=None, collector=None, **runtime_kwargs):
         chunk_size=3,
         reset_settle_seconds=0,
         alignment_timeout=0.1,
-        feedback_fallback=False,
+        gripper_frame_fallback=True,
         teleop_mapping=DAGGER.TeleopMapping(
             joint_sign=[1] * 6,
             joint_offset=[0] * 6,
@@ -222,7 +222,7 @@ def test_waiting_for_inference_does_not_resend_or_collect():
 
 
 def test_takeover_requires_new_master_control_frame(monkeypatch):
-    runtime = _make_runtime(feedback_fallback=True, alignment_timeout=0.01)
+    runtime = _make_runtime(gripper_frame_fallback=True, alignment_timeout=0.01)
     monkeypatch.setattr(DAGGER, "_read_master_ctrl_action", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         DAGGER,
@@ -232,6 +232,56 @@ def test_takeover_requires_new_master_control_frame(monkeypatch):
 
     with pytest.raises(RuntimeError, match="no new master control frame"):
         runtime._wait_for_master_action(object(), after_ctrl_timestamp=0.0)
+
+
+def test_master_ctrl_action_uses_timestamps_and_gripper_fallback_during_switch():
+    joint_ctrl = types.SimpleNamespace(
+        joint_1=0,
+        joint_2=57295,
+        joint_3=-57295,
+        joint_4=0,
+        joint_5=0,
+        joint_6=0,
+    )
+    controller = types.SimpleNamespace(
+        GetArmJointCtrl=lambda: types.SimpleNamespace(
+            Hz=0.0,
+            time_stamp=2.0,
+            joint_ctrl=joint_ctrl,
+        ),
+        GetArmGripperCtrl=lambda: types.SimpleNamespace(
+            Hz=0.0,
+            gripper_ctrl=types.SimpleNamespace(grippers_angle=0),
+        ),
+    )
+    master = types.SimpleNamespace(controller=controller)
+
+    action = DAGGER._read_master_ctrl_action(
+        master,
+        after_timestamp=1.0,
+        fallback_gripper=0.4,
+    )
+
+    assert action is not None
+    np.testing.assert_allclose(action[0][1:3], [57295 / 57295.7795, -57295 / 57295.7795])
+    assert action[1:] == (0.4, "ctrl")
+
+
+def test_master_ctrl_action_still_rejects_stale_joint_frame_with_gripper_fallback():
+    controller = types.SimpleNamespace(
+        GetArmJointCtrl=lambda: types.SimpleNamespace(
+            Hz=50.0,
+            time_stamp=1.0,
+            joint_ctrl=types.SimpleNamespace(),
+        ),
+    )
+    master = types.SimpleNamespace(controller=controller)
+
+    assert DAGGER._read_master_ctrl_action(
+        master,
+        after_timestamp=1.0,
+        fallback_gripper=0.4,
+    ) is None
 
 
 def test_reset_runs_existing_two_arm_init_script(tmp_path, monkeypatch):
@@ -439,6 +489,7 @@ class FakeSdk:
         self.motion_ctrl_1_calls = []
         self.master_slave_calls = []
         self.teaching_param_calls = []
+        self.joint_ctrl_timestamp = 12.5
         self.status = types.SimpleNamespace(
             ctrl_mode=0x01,
             teach_status=0x00,
@@ -473,6 +524,9 @@ class FakeSdk:
 
     def GetArmStatus(self):
         return types.SimpleNamespace(arm_status=self.status)
+
+    def GetArmJointCtrl(self):
+        return types.SimpleNamespace(time_stamp=self.joint_ctrl_timestamp)
 
     def JointCtrl(self, *_joints):
         pass
@@ -557,8 +611,9 @@ def test_piper_dagger_policy_send_uses_mit_for_follower(monkeypatch):
     }
     master.controller.status.teach_status = 0x01
     master.controller.status.motion_status = 0x01
-    robot.enable_master_drag_mode()
+    ctrl_timestamp_before_switch = robot.enable_master_drag_mode()
 
+    assert ctrl_timestamp_before_switch == 12.5
     assert master.controller.master_slave_calls == [
         (piper_module.MASTER_ROLE, 0x00, 0x00, 0x00)
     ]

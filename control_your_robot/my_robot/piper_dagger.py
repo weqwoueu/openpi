@@ -544,6 +544,7 @@ class PiperDAgger(Robot):
             speed_percent=15,
             gripper_effort=self._master_gripper_effort,
         )
+        time.sleep(0.1)
 
         settle_deadline = time.monotonic() + 2.0
         mode = teach = arm_state = motion = mode_feed = None
@@ -570,6 +571,13 @@ class PiperDAgger(Robot):
                 f"arm_status=0x{arm_state:02X}"
             )
 
+        # Snapshot after the hold command so its TX echo cannot be mistaken for
+        # a native master-input frame after the role switch.
+        ctrl_before_switch = master.GetArmJointCtrl()
+        ctrl_timestamp_before_switch = float(
+            getattr(ctrl_before_switch, "time_stamp", 0.0)
+        )
+
         # This PiperX teaching arm uses its native input-arm role for manual
         # motion. Switch only after the last autonomous MOVE_J is confirmed still.
         master.MasterSlaveConfig(
@@ -595,6 +603,7 @@ class PiperDAgger(Robot):
 
         self.reset_intervention_tracking()
         print("[mode] master input role requested; waiting for a new control frame")
+        return ctrl_timestamp_before_switch
 
     def disable_master_drag_mode(self):
         """Disable intervention mode: master arm becomes software-controllable follower"""

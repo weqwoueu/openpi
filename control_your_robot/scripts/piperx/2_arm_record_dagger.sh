@@ -18,8 +18,9 @@ FOLLOWER_CAN="can_left_slave"
 SAMPLE_FPS=30
 TELEOP_FPS=60
 CHUNK_SIZE=50
-# Request the next chunk with this many current actions left. 0 disables overlap.
-PREFETCH_THRESHOLD=0
+ASYNC_PREFETCH_ENABLED=false
+# When enabled, request the next chunk with this many current actions left.
+PREFETCH_THRESHOLD=25
 # Positive integer: save this many episodes. -1: keep collecting.
 NUM_EPISODES=-1
 # Positive integer: automatically stop for labeling at this frame. -1: unlimited RAM growth.
@@ -32,8 +33,11 @@ TARGET_INTERVENTION_SUCCESS=50
 TARGET_INTERVENTION_FAILURE=-1
 
 RESET_SETTLE_SECONDS=2.0
-ALIGNMENT_TIMEOUT=2.0
-FEEDBACK_FALLBACK=true
+# Maximum time to wait for a new 0xFA master joint-control frame.
+ALIGNMENT_TIMEOUT=5.0
+# true: use the pre-switch gripper value until the 0x159 gripper frame is ready.
+# This never allows stale joint frames to pass the takeover check.
+GRIPPER_FRAME_FALLBACK=true
 
 # Ordinary pi0.5 SFT: leave empty. PiStar inference: for example positive.
 # This affects inference only. Saved raw data always uses adv_ind=none.
@@ -84,6 +88,7 @@ args=(
     --sample-fps "$SAMPLE_FPS"
     --teleop-fps "$TELEOP_FPS"
     --chunk-size "$CHUNK_SIZE"
+    --async-prefetch-enabled "$ASYNC_PREFETCH_ENABLED"
     --prefetch-threshold "$PREFETCH_THRESHOLD"
     --num-episode "$NUM_EPISODES"
     --max-step "$MAX_STEPS"
@@ -93,7 +98,7 @@ args=(
     --target-intervention-failure "$TARGET_INTERVENTION_FAILURE"
     --reset-settle-seconds "$RESET_SETTLE_SECONDS"
     --alignment-timeout "$ALIGNMENT_TIMEOUT"
-    --feedback-fallback "$FEEDBACK_FALLBACK"
+    --gripper-frame-fallback "$GRIPPER_FRAME_FALLBACK"
     --ema-enabled "$EMA_ENABLED"
     --ema-alpha "$EMA_ALPHA"
     --slew-enabled "$SLEW_ENABLED"
