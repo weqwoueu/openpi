@@ -572,7 +572,6 @@ class PiperDAgger(Robot):
             speed_percent=15,
             gripper_effort=self._master_gripper_effort,
         )
-        master.MotionCtrl_1(0x00, 0x00, 0x00)
         master.MasterSlaveConfig(
             FOLLOWER_ROLE,
             FEEDBACK_OFFSET,
@@ -686,21 +685,43 @@ class PiperDAgger(Robot):
             f"gripper_error={last_gripper_error:.4f}"
         )
 
+    @staticmethod
+    def _wait_master_standby(master, timeout=2.0):
+        """Leave CAN control before requesting the native 0xFA input role."""
+        status_before = master.GetArmStatus()
+        timestamp_before = float(getattr(status_before, "time_stamp", 0.0))
+        master.MotionCtrl_2(0x00, 0x01, 0, 0x00)
+        deadline = time.monotonic() + float(timeout)
+        mode = arm_state = motion = None
+        status_timestamp = timestamp_before
+        while time.monotonic() < deadline:
+            status_report = master.GetArmStatus()
+            status_timestamp = float(getattr(status_report, "time_stamp", 0.0))
+            status = status_report.arm_status
+            mode = int(status.ctrl_mode)
+            arm_state = int(status.arm_status)
+            motion = int(status.motion_status)
+            fresh_status = status_timestamp > timestamp_before
+            if fresh_status and mode == 0x00 and arm_state == 0x00 and motion == 0x00:
+                print(
+                    "[mode] master standby confirmed: "
+                    f"status_timestamp={status_timestamp:.6f}"
+                )
+                return
+            time.sleep(0.05)
+        raise TimeoutError(
+            "master did not report a fresh standby state: "
+            f"ctrl_mode=0x{mode:02X}, motion_status=0x{motion:02X}, "
+            f"arm_status=0x{arm_state:02X}, "
+            f"status_timestamp={status_timestamp:.6f}, "
+            f"previous_timestamp={timestamp_before:.6f}"
+        )
+
     def enable_master_drag_mode(self, *, master_already_aligned=False):
         """Enable intervention mode: master arm becomes draggable teaching arm"""
         master = self.controllers["arm"]["right_arm"].controller
         if master is None:
             raise RuntimeError("Master controller is not initialized")
-
-        status = master.GetArmStatus().arm_status
-        if int(status.ctrl_mode) == 0x01 and int(status.teach_status) == 0x01:
-            # Cancel a previously accepted but incomplete teach-mode request.
-            master.MotionCtrl_1(0x00, 0x00, 0x02)
-            time.sleep(0.1)
-        # 0x02 is an exit request, not the neutral state. Clear it before every
-        # new 0xFA transition so repeated takeovers can enter drag mode again.
-        master.MotionCtrl_1(0x00, 0x00, 0x00)
-        time.sleep(0.1)
 
         if not master_already_aligned:
             # Stop the master's last autonomous MOVE_J at its live feedback pose.
@@ -713,31 +734,6 @@ class PiperDAgger(Robot):
             )
             time.sleep(0.1)
 
-        settle_deadline = time.monotonic() + 2.0
-        mode = teach = arm_state = motion = mode_feed = None
-        while time.monotonic() < settle_deadline:
-            status = master.GetArmStatus().arm_status
-            mode = int(status.ctrl_mode)
-            teach = int(status.teach_status)
-            arm_state = int(status.arm_status)
-            motion = int(status.motion_status)
-            mode_feed = int(status.mode_feed)
-            if (
-                mode == 0x01
-                and teach in (0x00, 0x02)
-                and arm_state == 0x00
-                and motion == 0x00
-            ):
-                break
-            time.sleep(0.05)
-        else:
-            raise TimeoutError(
-                "master did not settle before drag teaching: "
-                f"ctrl_mode=0x{mode:02X}, mode_feed=0x{mode_feed:02X}, "
-                f"teach_status=0x{teach:02X}, motion_status=0x{motion:02X}, "
-                f"arm_status=0x{arm_state:02X}"
-            )
-
         # Snapshot after the hold command so its TX echo cannot be mistaken for
         # a native master-input frame after the role switch.
         ctrl_before_switch = master.GetArmJointCtrl()
@@ -745,8 +741,9 @@ class PiperDAgger(Robot):
             getattr(ctrl_before_switch, "time_stamp", 0.0)
         )
 
-        # This PiperX teaching arm uses its native input-arm role for manual
-        # motion. Switch only after the last autonomous MOVE_J is confirmed still.
+        # 0xFA is a native linkage input role, not MotionCtrl_1 drag recording.
+        # Leave CAN control first so the firmware sees a clean standby -> 0xFA edge.
+        self._wait_master_standby(master)
         master.MasterSlaveConfig(
             MASTER_ROLE,
             FEEDBACK_OFFSET,
@@ -766,30 +763,26 @@ class PiperDAgger(Robot):
         except Exception as e:
             print(f"[warn] failed to set teaching friction: {e}")
 
-        master.MotionCtrl_1(0x00, 0x00, 0x01)
-
         self.reset_intervention_tracking()
         print("[mode] master input role requested; waiting for a new control frame")
         return ctrl_timestamp_before_switch
 
     def retry_master_input_role(self):
-        """Re-issue the idempotent PiperX input-role transition."""
+        """Retry an input-role request that left normal status feedback active."""
         master = self.controllers["arm"]["right_arm"].controller
         if master is None:
             raise RuntimeError("Master controller is not initialized")
 
-        status = master.GetArmStatus().arm_status
-        if int(status.teach_status) == 0x02:
-            master.MotionCtrl_1(0x00, 0x00, 0x00)
-            time.sleep(0.1)
+        # Recreate the standby -> 0xFA edge without switching an active input
+        # arm through 0xFC, which PiperX firmware does not reliably support.
+        self._wait_master_standby(master)
         master.MasterSlaveConfig(
             MASTER_ROLE,
             FEEDBACK_OFFSET,
             CTRL_OFFSET,
             LINKAGE_OFFSET,
         )
-        time.sleep(0.2)
-        master.MotionCtrl_1(0x00, 0x00, 0x01)
+        time.sleep(0.5)
 
     def disable_master_drag_mode(self):
         """Disable intervention mode: master arm becomes software-controllable follower"""
@@ -805,12 +798,8 @@ class PiperDAgger(Robot):
 
         master_state = self.get_master_input_state()
 
-        # Exit drag teaching, then use the live pose as the first CAN target so
-        # the master does not return to a stale pre-takeover command.
-        master.MotionCtrl_1(0x00, 0x00, 0x02)  # Exit drag teaching
-        time.sleep(0.15)
-        master.MotionCtrl_1(0x00, 0x00, 0x00)  # Clear the exit request
-        time.sleep(0.1)
+        # 0xFA did not start MotionCtrl_1 drag recording. Return only through
+        # the matching linkage role, then seed CAN control from the live pose.
         master.MasterSlaveConfig(
             FOLLOWER_ROLE,
             FEEDBACK_OFFSET,
@@ -818,6 +807,7 @@ class PiperDAgger(Robot):
             LINKAGE_OFFSET,
         )
         time.sleep(0.25)
+        self._wait_master_standby(master)
 
         self.reset_intervention_tracking()
         self._send_arm_target(

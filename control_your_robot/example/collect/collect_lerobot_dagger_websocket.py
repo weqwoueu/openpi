@@ -817,6 +817,7 @@ class DaggerRuntime:
 
     def start_episode(self, generation: int):
         self.stop_active_control(restore_master=True)
+        self._clear_teleop_errors()
         self.collector.clear_current_episode()
         self.robot.set_policy_enabled(False)
         self._run_reset_script()
@@ -908,6 +909,7 @@ class DaggerRuntime:
         return True
 
     def begin_takeover(self, generation: int):
+        self._clear_teleop_errors()
         self._invalidate_policy(generation)
         self.robot.set_policy_enabled(False)
         master = self.robot.controllers["arm"]["right_arm"]
@@ -986,10 +988,15 @@ class DaggerRuntime:
             if retries < self.master_role_retries and now >= next_retry_at:
                 retries += 1
                 print(
-                    f"[mode] no new master frame; retrying input role "
+                    f"[mode] no new master frame; retrying standby -> input role "
                     f"({retries}/{self.master_role_retries})"
                 )
-                self.robot.retry_master_input_role()
+                try:
+                    self.robot.retry_master_input_role()
+                except TimeoutError as error:
+                    raise TakeoverTransitionError(
+                        f"master input-role retry failed: {error}"
+                    ) from error
                 next_retry_at = time.monotonic() + self.master_role_retry_interval
             time.sleep(0.02)
 
@@ -1082,14 +1089,17 @@ class DaggerRuntime:
         self._invalidate_policy(generation)
         self.stop_active_control(restore_master=True)
 
-    def recover_failed_takeover(self, generation: int):
-        self.stop_active_control(restore_master=True)
-        self._invalidate_policy(generation)
+    def _clear_teleop_errors(self):
         while True:
             try:
                 self._teleop_errors.get_nowait()
             except queue.Empty:
-                break
+                return
+
+    def recover_failed_takeover(self, generation: int):
+        self.stop_active_control(restore_master=True)
+        self._invalidate_policy(generation)
+        self._clear_teleop_errors()
         self.robot.set_policy_enabled(True)
         self._latest_observation = make_policy_observation(
             self.robot.get(), self.prompt, self.inference_adv_ind

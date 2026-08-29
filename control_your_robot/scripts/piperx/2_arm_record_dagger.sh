@@ -38,7 +38,7 @@ ALIGNMENT_TIMEOUT=5.0
 # true: use the pre-switch gripper value until the 0x159 gripper frame is ready.
 # This never allows stale joint frames to pass the takeover check.
 GRIPPER_FRAME_FALLBACK=true
-# Retry 0xFA + drag request when no new native master frame appears.
+# Retry standby -> 0xFA when no new native master frame appears.
 MASTER_ROLE_RETRIES=3
 MASTER_ROLE_RETRY_INTERVAL=1.0
 # Before 0xFA, move the master to the follower's frozen feedback pose.

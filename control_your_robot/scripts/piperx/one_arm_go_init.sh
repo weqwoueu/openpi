@@ -165,12 +165,12 @@ try:
     ctrl_mode = getattr(arm_status, "ctrl_mode", None)
     if ctrl_mode == 0x01:
         print(f"[mode-check] {label} 当前显示为 CAN 指令控制模式(0x01)。")
+        need_switch = False
     else:
         print(f"[mode-check] {label} 当前模式={ctrl_mode}，将切换到从臂模式。")
 except Exception as e:
     print(f"[mode-check] {label} 读取模式失败({e})，将执行切换。")
 
-need_switch = True
 if need_switch:
     piper.MasterSlaveConfig(
         linkage_config=0xFC,

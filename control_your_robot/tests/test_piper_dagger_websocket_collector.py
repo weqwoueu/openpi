@@ -451,6 +451,37 @@ def test_reset_runs_existing_two_arm_init_script(tmp_path, monkeypatch):
     assert calls == [(["bash", str(reset_script)], True)]
 
 
+def test_next_episode_clears_previous_teleop_error(tmp_path, monkeypatch):
+    class EpisodeRobot(FakeRobot):
+        def __init__(self):
+            super().__init__()
+            self.controllers = {
+                "arm": {"left_arm": types.SimpleNamespace(controller=object())}
+            }
+
+        def set_policy_enabled(self, _enabled):
+            pass
+
+        def hold_follower_position(self):
+            pass
+
+    reset_script = tmp_path / "2_arm_go_init.sh"
+    reset_script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    monkeypatch.setattr(DAGGER.subprocess, "run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        DAGGER,
+        "make_policy_observation",
+        lambda *_args, **_kwargs: {"observation": "current"},
+    )
+    runtime = _make_runtime(robot=EpisodeRobot(), reset_script=reset_script)
+    runtime._teleop_errors.put(RuntimeError("previous episode"))
+
+    runtime.start_episode(2)
+
+    assert runtime._teleop_errors.empty()
+    assert runtime.generation == 2
+
+
 def test_raw_dagger_save_keeps_advantage_unlabeled():
     for success in (True, False):
         collector = FakeSavingCollector()
@@ -636,11 +667,14 @@ def test_teleop_mapping_starts_at_follower_and_preserves_master_delta():
 
 class FakeSdk:
     def __init__(self):
+        self.events = []
         self.mode_flags = []
+        self.motion_ctrl_2_calls = []
         self.motion_ctrl_1_calls = []
         self.master_slave_calls = []
         self.teaching_param_calls = []
         self.joint_ctrl_timestamp = 12.5
+        self.status_timestamp = 20.0
         self.status = types.SimpleNamespace(
             ctrl_mode=0x01,
             teach_status=0x00,
@@ -650,6 +684,7 @@ class FakeSdk:
         )
 
     def MotionCtrl_1(self, *args):
+        self.events.append(("motion1", args))
         self.motion_ctrl_1_calls.append(args)
         if args[2] == 0x01:
             if self.status.ctrl_mode != 0x06:
@@ -660,23 +695,32 @@ class FakeSdk:
         elif args[2] == 0x00:
             self.status.teach_status = 0x00
 
-    def MotionCtrl_2(self, _ctrl_mode, _move_mode, _speed, mode_flag):
+    def MotionCtrl_2(self, ctrl_mode, move_mode, speed, mode_flag):
+        self.events.append(("motion2", ctrl_mode))
+        self.motion_ctrl_2_calls.append((ctrl_mode, move_mode, speed, mode_flag))
         self.mode_flags.append(mode_flag)
-        self.status.ctrl_mode = 0x01
+        self.status.ctrl_mode = ctrl_mode
         self.status.motion_status = 0x00
 
     def MasterSlaveConfig(self, *args):
+        self.events.append(("role", args[0]))
         self.master_slave_calls.append(args)
         if args[0] == 0xFA:
+            if self.status.ctrl_mode == 0x00:
+                self.joint_ctrl_timestamp += 1.0
             self.status.ctrl_mode = 0x06
         elif args[0] == 0xFC:
-            self.status.ctrl_mode = 0x01
+            self.status.ctrl_mode = 0x00
 
     def GripperTeachingPendantParamConfig(self, **kwargs):
         self.teaching_param_calls.append(kwargs)
 
     def GetArmStatus(self):
-        return types.SimpleNamespace(arm_status=self.status)
+        self.status_timestamp += 0.1
+        return types.SimpleNamespace(
+            time_stamp=self.status_timestamp,
+            arm_status=self.status,
+        )
 
     def GetArmJointCtrl(self):
         return types.SimpleNamespace(time_stamp=self.joint_ctrl_timestamp)
@@ -824,6 +868,7 @@ def test_piper_dagger_policy_send_uses_mit_for_follower(monkeypatch):
     assert len(alignment_commands) == 1
 
     robot._send_arm_target = original_send_arm_target
+    master.controller.events.clear()
     master.controller.master_slave_calls.clear()
     master.controller.motion_ctrl_1_calls.clear()
     robot.reset_intervention_tracking = lambda: None
@@ -831,19 +876,18 @@ def test_piper_dagger_policy_send_uses_mit_for_follower(monkeypatch):
         "joint": np.arange(6, dtype=float) / 10,
         "gripper": 0.5,
     }
-    master.controller.status.teach_status = 0x01
-    master.controller.status.motion_status = 0x01
-    ctrl_timestamp_before_switch = robot.enable_master_drag_mode()
+    ctrl_timestamp_before_switch = robot.enable_master_drag_mode(
+        master_already_aligned=True
+    )
 
     assert ctrl_timestamp_before_switch == 12.5
     assert master.controller.master_slave_calls == [
         (piper_module.MASTER_ROLE, 0x00, 0x00, 0x00)
     ]
-    assert master.controller.motion_ctrl_1_calls == [
-        (0x00, 0x00, 0x02),
-        (0x00, 0x00, 0x00),
-        (0x00, 0x00, 0x01),
-    ]
+    assert master.controller.motion_ctrl_1_calls == []
+    assert master.controller.motion_ctrl_2_calls[-1] == (0x00, 0x01, 0, 0x00)
+    assert master.controller.events[:2] == [("motion2", 0x00), ("role", 0xFA)]
+    assert master.controller.joint_ctrl_timestamp == 13.5
     assert master.controller.teaching_param_calls == [
         {
             "teaching_range_per": 100,
@@ -852,6 +896,7 @@ def test_piper_dagger_policy_send_uses_mit_for_follower(monkeypatch):
         }
     ]
 
+    master.controller.events.clear()
     robot.retry_master_input_role()
     assert master.controller.master_slave_calls[-1] == (
         piper_module.MASTER_ROLE,
@@ -859,18 +904,26 @@ def test_piper_dagger_policy_send_uses_mit_for_follower(monkeypatch):
         0x00,
         0x00,
     )
-    assert master.controller.motion_ctrl_1_calls[-1] == (0x00, 0x00, 0x01)
+    assert master.controller.motion_ctrl_1_calls == []
+    assert master.controller.events == [
+        ("motion2", 0x00),
+        ("role", 0xFA),
+    ]
+    assert master.controller.joint_ctrl_timestamp == 14.5
 
     robot.reassert_follower_hold = lambda: None
     robot.get_master_input_state = robot.get_master_state
     robot.disable_master_drag_mode()
     robot.enable_master_drag_mode()
-    assert master.controller.motion_ctrl_1_calls[-4:] == [
-        (0x00, 0x00, 0x02),
-        (0x00, 0x00, 0x00),
-        (0x00, 0x00, 0x00),
-        (0x00, 0x00, 0x01),
-    ]
+    assert master.controller.motion_ctrl_1_calls == []
+    assert master.controller.joint_ctrl_timestamp == 15.5
+
+    get_fresh_status = master.controller.GetArmStatus
+    stale_status = get_fresh_status()
+    master.controller.GetArmStatus = lambda: stale_status
+    with pytest.raises(TimeoutError, match="fresh standby state"):
+        PiperDAgger._wait_master_standby(master.controller, timeout=0.001)
+    master.controller.GetArmStatus = get_fresh_status
 
     can_bus = FakeCanBus()
 
