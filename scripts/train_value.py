@@ -6,7 +6,7 @@
         --checkpoint_dir /path/to/save/checkpoints \
         --batch_size 32 \
         --num_train_steps 10000 \
-        --load_pretrained  # 加载 PaliGemma 预训练权重
+        --load_pretrained  # 加载 SigLIP + Gemma3-270M 预训练权重
 """
 
 import os
@@ -43,7 +43,6 @@ from openpi.models import model as _model
 from openpi.models.value_model_config import ValueModelConfig
 from openpi.shared import array_typing as at
 from openpi.shared import console
-from openpi.shared import progress
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
 import openpi.training.sharding as sharding
@@ -172,6 +171,7 @@ def build_value_data_config(
     return _config.DataConfig(
         local_data_dir=local_data_dir,
         prompt_from_task=True,
+        action_sequence_keys=(),
         data_transforms=_transforms.Group(
             inputs=[RemapValueLabelKey(), value_policy.ValueInputs()],
         ),
@@ -287,6 +287,8 @@ def create_train_state(
     warmup_steps: int | None = None,
     grad_clip_norm: float = 1.0,
     freeze_mode: str = "all_backbones",
+    siglip_path: str | None = None,
+    gemma_checkpoint_dir: str | None = None,
 ) -> tuple[TrainState, optax.GradientTransformation, optax.Schedule]:
     """创建训练状态。"""
     model = config.create(rng)
@@ -294,7 +296,10 @@ def create_train_state(
 
     if load_pretrained:
         logging.info(console.info("加载 SigLIP + Gemma3-270M 预训练权重..."))
-        loader = ValueModelWeightLoader()
+        loader = ValueModelWeightLoader(
+            siglip_path=siglip_path,
+            gemma_checkpoint_dir=gemma_checkpoint_dir,
+        )
         params_dict = params.to_pure_dict()
         loaded_params = loader.load(params_dict)
         params.replace_by_pure_dict(loaded_params)
@@ -486,7 +491,9 @@ def main():
     parser.add_argument("--gemma_variant", type=str, default="gemma3_270m", help="Gemma 变体")
     parser.add_argument("--siglip_variant", type=str, default="So400m/14", help="SigLIP 变体")
     parser.add_argument("--fsdp_devices", type=int, default=1, help="FSDP设备数量，>1启用模型并行")
-    parser.add_argument("--load_pretrained", action="store_true", help="加载 PaliGemma 预训练权重")
+    parser.add_argument("--load_pretrained", action="store_true", help="加载 SigLIP + Gemma3-270M 预训练权重")
+    parser.add_argument("--siglip_path", type=str, default=None, help="SigLIP2 .npz 预训练权重路径")
+    parser.add_argument("--gemma_checkpoint_dir", type=str, default=None, help="Gemma3-270M checkpoint 目录")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="从指定checkpoint恢复训练（例如：step_00001000）")
     parser.add_argument("--pyarrow_num_threads", type=int, default=0, help="PyArrow 读取并行线程数，0表示不设置")
     parser.add_argument("--tokenizer_path", type=str, default=None, help="可选的 Gemma3 tokenizer.model 本地路径")
@@ -691,6 +698,8 @@ def main():
         warmup_steps=args.warmup_steps,
         grad_clip_norm=args.grad_clip_norm,
         freeze_mode=args.freeze_mode,
+        siglip_path=args.siglip_path,
+        gemma_checkpoint_dir=args.gemma_checkpoint_dir,
     )
     logging.info("\033[1;32m模型初始化完成\033[0m")
     
@@ -779,7 +788,6 @@ def main():
         desc="训练进度",
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
     )
-    progress.sync_pbar_color(pbar)
     infos = []
 
     # π0风格：数据预取和GPU利用率优化
@@ -854,7 +862,6 @@ def main():
             )
 
     for step in pbar:
-        progress.sync_pbar_color(pbar)
         # 使用预取的batch或获取新batch
         if prefetch_idx < len(prefetch_batches):
             observation, value = prefetch_batches[prefetch_idx]

@@ -1,12 +1,23 @@
 """Quick sanity check for value dataset batches."""
 
 import argparse
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 import jax
 import numpy as np
 
+from openpi.models.value_model_config import ValueModelConfig
 from openpi.shared import console
-from openpi.training.value_data_loader import ValueDataLoader
+import openpi.training.data_loader as data_loader
+from train_value import _resolve_local_gemma_tokenizer_path
+from train_value import _validate_gemma_tokenizer
+from train_value import build_value_data_config
 
 
 def _summarize_values(values: np.ndarray) -> str:
@@ -37,30 +48,33 @@ def main() -> None:
     parser.add_argument("--data_dir", type=str, required=True, help="LeRobot 数据集路径")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--steps", type=int, default=3, help="检查几个 batch")
-    parser.add_argument("--image_size", type=int, default=224, help="图像分辨率（正方形）")
     parser.add_argument("--num_workers", type=int, default=0, help="DataLoader worker 数量")
     parser.add_argument("--shuffle", action=argparse.BooleanOptionalAction, default=True, help="是否打乱数据")
-    parser.add_argument("--use_delta_timestamps", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--ignore_videos", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--infinite_sampling", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--tokenizer_path", type=str, default=None, help="Gemma3 tokenizer.model 路径")
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
     args = parser.parse_args()
 
-    image_resolution = (args.image_size, args.image_size)
-    data_loader = ValueDataLoader(
+    tokenizer_path = _resolve_local_gemma_tokenizer_path(args.tokenizer_path)
+    _validate_gemma_tokenizer(tokenizer_path)
+    model_config = ValueModelConfig()
+    data_config = build_value_data_config(
         args.data_dir,
+        model_config,
+        tokenizer_path=tokenizer_path,
+    )
+    loader = data_loader.create_value_data_loader(
+        data_config,
+        model_config,
         batch_size=args.batch_size,
         shuffle=args.shuffle,
         num_workers=args.num_workers,
-        image_size=image_resolution,
-        use_delta_timestamps=args.use_delta_timestamps,
-        ignore_videos=args.ignore_videos,
-        infinite_sampling=args.infinite_sampling,
         seed=args.seed,
         sharding=None,
+        skip_norm_stats=True,
+        framework="jax",
     )
 
-    data_iter = iter(data_loader)
+    data_iter = iter(loader)
     for i in range(args.steps):
         observation, value = next(data_iter)
         obs_host = jax.device_get(observation)

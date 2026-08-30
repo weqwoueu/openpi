@@ -47,6 +47,33 @@ def test_torch_data_loader_parallel():
         assert all(x.shape[0] == 4 for x in jax.tree.leaves(batch))
 
 
+def test_create_torch_dataset_uses_local_root(tmp_path, monkeypatch):
+    calls = {}
+
+    class FakeMetadata:
+        fps = 30
+
+        def __init__(self, repo_id, root=None):
+            calls["metadata"] = (repo_id, root)
+
+    class FakeLeRobotDataset:
+        def __init__(self, repo_id, root=None, delta_timestamps=None):
+            calls["dataset"] = (repo_id, root, delta_timestamps)
+
+    monkeypatch.setattr(_data_loader.lerobot_dataset, "LeRobotDatasetMetadata", FakeMetadata)
+    monkeypatch.setattr(_data_loader.lerobot_dataset, "LeRobotDataset", FakeLeRobotDataset)
+
+    model_config = pi0_config.Pi0Config(action_dim=7, action_horizon=1, max_token_len=48)
+    data_config = _config.DataConfig(local_data_dir=str(tmp_path), action_sequence_keys=())
+
+    _data_loader.create_torch_dataset(data_config, action_horizon=1, model_config=model_config)
+
+    expected_repo_id = f"local/{tmp_path.name}"
+    expected_root = tmp_path.resolve()
+    assert calls["metadata"] == (expected_repo_id, expected_root)
+    assert calls["dataset"] == (expected_repo_id, expected_root, {})
+
+
 def test_with_fake_dataset():
     config = _config.get_config("debug")
 

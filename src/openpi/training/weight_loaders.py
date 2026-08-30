@@ -308,11 +308,20 @@ class ValueModelWeightLoader(WeightLoader):
     """
 
     gemma_variant: str = "gemma3-270m"
+    siglip_path: str | None = None
+    gemma_checkpoint_dir: str | None = None
 
     def load(self, params: at.Params) -> at.Params:
         logger.info(console.info("加载 SigLIP 权重 (from local checkpoint)..."))
-        #siglip_path = "/data/train_dataset/checkpoint/siglip2-so400m-patch14-384-jax/siglip2_so400m14_224.npz"
-        siglip_path = "/public/home/wangsenbao_it/litianheng/checkpoint/siglip2-so400m-patch14-224-jax/siglip2_so400m14_224.npz"
+        siglip_path = self.siglip_path or os.getenv("OPENPI_VALUE_SIGLIP_PATH")
+        if not siglip_path:
+            raise ValueError(
+                "SigLIP checkpoint path is required. Pass --siglip_path or set "
+                "OPENPI_VALUE_SIGLIP_PATH."
+            )
+        siglip_path = os.path.abspath(os.path.expanduser(siglip_path))
+        if not os.path.isfile(siglip_path):
+            raise FileNotFoundError(f"SigLIP checkpoint not found: {siglip_path}")
         siglip_params = None
         if bv_utils is not None:
             try:
@@ -336,8 +345,15 @@ class ValueModelWeightLoader(WeightLoader):
             _summarize_param_match("SigLIP", siglip_params, params["img"])
 
         logger.info(console.info("加载 Gemma 3 270M 权重 (from local Orbax checkpoint)..."))
-        gemma_checkpoint_dir = "/public/home/wangsenbao_it/litianheng/checkpoint/gemma-3-270m"
-        #gemma_checkpoint_dir = "/data/train_dataset/checkpoint/gemma-3-270m"
+        gemma_checkpoint_dir = self.gemma_checkpoint_dir or os.getenv("OPENPI_VALUE_GEMMA_CKPT")
+        if not gemma_checkpoint_dir:
+            raise ValueError(
+                "Gemma checkpoint path is required. Pass --gemma_checkpoint_dir or set "
+                "OPENPI_VALUE_GEMMA_CKPT."
+            )
+        gemma_checkpoint_dir = os.path.abspath(os.path.expanduser(gemma_checkpoint_dir))
+        if not os.path.isdir(gemma_checkpoint_dir):
+            raise FileNotFoundError(f"Gemma checkpoint directory not found: {gemma_checkpoint_dir}")
 
         # 使用 Gemma 官方 ckpts loader（优先），必要时回退 Orbax
         try:
