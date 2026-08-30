@@ -155,15 +155,7 @@ def _make_runtime(worker=None, robot=None, collector=None, **runtime_kwargs):
         teleop_fps=60,
         chunk_size=3,
         reset_settle_seconds=0,
-        alignment_timeout=0.1,
-        gripper_frame_fallback=True,
-        master_role_retries=0,
-        master_role_retry_interval=0.01,
-        takeover_align_enabled=False,
-        takeover_align_fps=50,
-        takeover_align_max_joint_step=0.01,
-        takeover_align_settle_seconds=0.5,
-        takeover_align_timeout=8.0,
+        takeover_align_speed=60,
         teleop_mapping=DAGGER.TeleopMapping(
             joint_sign=[1] * 6,
             joint_offset=[0] * 6,
@@ -243,43 +235,117 @@ def test_waiting_for_inference_does_not_resend_or_collect():
     assert runtime.step_count == 0
 
 
-def test_takeover_requires_new_master_control_frame(monkeypatch):
-    runtime = _make_runtime(gripper_frame_fallback=True, alignment_timeout=0.01)
-    monkeypatch.setattr(DAGGER, "_read_master_ctrl_action", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        DAGGER,
-        "_read_master_feedback_action",
-        lambda _master: (np.zeros(6), 0.0, "feedback"),
-    )
+def test_master_feedback_action_does_not_depend_on_joint_ctrl_frames():
+    expected_joint = np.linspace(-0.3, 0.3, 6)
 
-    with pytest.raises(RuntimeError, match="no new master control frame"):
-        runtime._wait_for_master_action(object(), after_ctrl_timestamp=0.0)
+    class FeedbackMaster:
+        controller = types.SimpleNamespace(
+            GetArmJointCtrl=lambda: (_ for _ in ()).throw(
+                AssertionError("takeover must not read JointCtrl")
+            )
+        )
+
+        @staticmethod
+        def get_state():
+            return {"joint": expected_joint, "gripper": 0.4}
+
+    action = DAGGER._read_master_feedback_action(FeedbackMaster())
+
+    assert action is not None
+    np.testing.assert_allclose(action[0], expected_joint)
+    assert action[1:] == (0.4, "feedback")
 
 
-def test_takeover_retries_input_role_until_new_control_frame(monkeypatch):
-    class RetryRobot:
+def test_runtime_takeover_uses_master_feedback_for_two_cycles(monkeypatch):
+    from robot.utils import teleop_filter
+
+    class DeterministicLoop:
+        def __init__(self, _fps, step):
+            self.step = step
+
+        def start(self):
+            pass
+
+        def stop(self, timeout=None):
+            return True
+
+        def get_latest(self):
+            return None
+
+    class FeedbackMaster:
         def __init__(self):
-            self.retries = 0
+            self.state = {"joint": np.zeros(6), "gripper": 0.0}
+            self.controller = types.SimpleNamespace(
+                GetArmJointCtrl=lambda: (_ for _ in ()).throw(
+                    AssertionError("runtime takeover must not read JointCtrl")
+                )
+            )
 
-        def retry_master_input_role(self):
-            self.retries += 1
+        def get_state(self):
+            return {
+                "joint": np.asarray(self.state["joint"], dtype=float).copy(),
+                "gripper": float(self.state["gripper"]),
+            }
 
-    robot = RetryRobot()
-    runtime = _make_runtime(
-        robot=robot,
-        alignment_timeout=0.1,
-        master_role_retries=2,
-        master_role_retry_interval=0.001,
-    )
-    action = (np.zeros(6), 0.5, "ctrl")
-    monkeypatch.setattr(
-        DAGGER,
-        "_read_master_ctrl_action",
-        lambda *args, **kwargs: action if robot.retries else None,
-    )
+    class FeedbackTakeoverRobot(FakeRobot):
+        def __init__(self):
+            super().__init__()
+            self.master = FeedbackMaster()
+            self.follower_state = {"joint": np.zeros(6), "gripper": 0.0}
+            self.controllers = {
+                "arm": {
+                    "left_arm": types.SimpleNamespace(controller=object()),
+                    "right_arm": self.master,
+                }
+            }
+            self.transitions = []
 
-    assert runtime._wait_for_master_action(object(), after_ctrl_timestamp=1.0) == action
-    assert robot.retries == 1
+        def set_policy_enabled(self, enabled):
+            self.transitions.append(("policy", bool(enabled)))
+
+        def get_follower_state(self):
+            return {
+                "joint": np.asarray(self.follower_state["joint"], dtype=float).copy(),
+                "gripper": float(self.follower_state["gripper"]),
+            }
+
+        def hold_follower_position(self):
+            self.transitions.append(("hold",))
+
+        def align_master_to_follower(self, follower_state, *, speed):
+            self.transitions.append(("align", int(speed)))
+            self.master.state = {
+                "joint": np.asarray(follower_state["joint"], dtype=float).copy(),
+                "gripper": float(follower_state["gripper"]),
+            }
+
+        def enable_master_drag_mode(self):
+            self.transitions.append(("role", 0xFA))
+
+        def disable_master_drag_mode(self):
+            self.transitions.append(("role", 0xFC))
+
+    monkeypatch.setattr(teleop_filter, "FixedRateControlLoop", DeterministicLoop)
+    robot = FeedbackTakeoverRobot()
+    runtime = _make_runtime(robot=robot, takeover_align_speed=60)
+
+    for generation, joint in enumerate((np.full(6, 0.1), np.full(6, -0.2)), start=1):
+        robot.follower_state = {"joint": joint, "gripper": generation / 10}
+        runtime.begin_takeover(generation)
+        assert runtime.teleop_mapping.source == "feedback"
+        np.testing.assert_allclose(robot.master.state["joint"], joint)
+        runtime.stop_episode(generation + 10)
+
+    assert [event for event in robot.transitions if event[0] == "align"] == [
+        ("align", 60),
+        ("align", 60),
+    ]
+    assert [event for event in robot.transitions if event[0] == "role"] == [
+        ("role", 0xFA),
+        ("role", 0xFC),
+        ("role", 0xFA),
+        ("role", 0xFC),
+    ]
 
 
 def test_takeover_only_wraps_expected_transition_timeouts():
@@ -311,14 +377,12 @@ def test_takeover_only_wraps_expected_transition_timeouts():
 
     timeout_runtime = _make_runtime(
         robot=TransitionRobot(TimeoutError("alignment timed out")),
-        takeover_align_enabled=True,
     )
     with pytest.raises(DAGGER.TakeoverTransitionError, match="alignment timed out"):
         timeout_runtime.begin_takeover(1)
 
     can_runtime = _make_runtime(
         robot=TransitionRobot(RuntimeError("master CAN send failed")),
-        takeover_align_enabled=True,
     )
     with pytest.raises(RuntimeError, match="master CAN send failed") as error:
         can_runtime.begin_takeover(1)
@@ -373,66 +437,6 @@ def test_failed_takeover_recovery_preserves_episode_and_restarts_policy(monkeypa
     assert runtime._teleop_errors.empty()
     assert len(worker.requests) == 1
     assert worker.requests[0].generation == 4
-
-
-def test_master_ctrl_action_uses_timestamps_and_gripper_fallback_during_switch():
-    joint_ctrl = types.SimpleNamespace(
-        joint_1=0,
-        joint_2=57295,
-        joint_3=-57295,
-        joint_4=0,
-        joint_5=0,
-        joint_6=0,
-    )
-    controller = types.SimpleNamespace(
-        GetArmJointCtrl=lambda: types.SimpleNamespace(
-            Hz=0.0,
-            time_stamp=2.0,
-            joint_ctrl=joint_ctrl,
-        ),
-        GetArmGripperCtrl=lambda: types.SimpleNamespace(
-            Hz=0.0,
-            gripper_ctrl=types.SimpleNamespace(grippers_angle=0),
-        ),
-    )
-    master = types.SimpleNamespace(controller=controller)
-
-    action = DAGGER._read_master_ctrl_action(
-        master,
-        after_timestamp=1.0,
-        fallback_gripper=0.4,
-    )
-
-    assert action is not None
-    np.testing.assert_allclose(action[0][1:3], [57295 / 57295.7795, -57295 / 57295.7795])
-    assert action[1:] == (0.4, "ctrl")
-
-
-def test_master_ctrl_action_still_rejects_stale_joint_frame_with_gripper_fallback():
-    controller = types.SimpleNamespace(
-        GetArmJointCtrl=lambda: types.SimpleNamespace(
-            Hz=50.0,
-            time_stamp=1.0,
-            joint_ctrl=types.SimpleNamespace(),
-        ),
-    )
-    master = types.SimpleNamespace(controller=controller)
-
-    assert DAGGER._read_master_ctrl_action(
-        master,
-        after_timestamp=1.0,
-        fallback_gripper=0.4,
-    ) is None
-
-
-def test_master_ctrl_action_propagates_sdk_read_errors():
-    controller = types.SimpleNamespace(
-        GetArmJointCtrl=lambda: (_ for _ in ()).throw(RuntimeError("CAN read failed")),
-    )
-    master = types.SimpleNamespace(controller=controller)
-
-    with pytest.raises(RuntimeError, match="CAN read failed"):
-        DAGGER._read_master_ctrl_action(master, fallback_gripper=0.4)
 
 
 def test_reset_runs_existing_two_arm_init_script(tmp_path, monkeypatch):
@@ -675,6 +679,8 @@ class FakeSdk:
         self.teaching_param_calls = []
         self.joint_ctrl_timestamp = 12.5
         self.status_timestamp = 20.0
+        self.feedback_joint = np.zeros(6, dtype=float)
+        self.feedback_gripper = 0.0
         self.status = types.SimpleNamespace(
             ctrl_mode=0x01,
             teach_status=0x00,
@@ -706,11 +712,9 @@ class FakeSdk:
         self.events.append(("role", args[0]))
         self.master_slave_calls.append(args)
         if args[0] == 0xFA:
-            if self.status.ctrl_mode == 0x00:
-                self.joint_ctrl_timestamp += 1.0
             self.status.ctrl_mode = 0x06
         elif args[0] == 0xFC:
-            self.status.ctrl_mode = 0x00
+            self.status.ctrl_mode = 0x01
 
     def GripperTeachingPendantParamConfig(self, **kwargs):
         self.teaching_param_calls.append(kwargs)
@@ -723,13 +727,55 @@ class FakeSdk:
         )
 
     def GetArmJointCtrl(self):
-        return types.SimpleNamespace(time_stamp=self.joint_ctrl_timestamp)
+        joint_cmd = np.rint(self.feedback_joint * 57295.7795).astype(int)
+        return types.SimpleNamespace(
+            Hz=0.0,
+            time_stamp=self.joint_ctrl_timestamp,
+            joint_ctrl=types.SimpleNamespace(
+                joint_1=int(joint_cmd[0]),
+                joint_2=int(joint_cmd[1]),
+                joint_3=int(joint_cmd[2]),
+                joint_4=int(joint_cmd[3]),
+                joint_5=int(joint_cmd[4]),
+                joint_6=int(joint_cmd[5]),
+            ),
+        )
 
-    def JointCtrl(self, *_joints):
-        pass
+    def GetArmJointMsgs(self):
+        joint = np.rint(self.feedback_joint * 57295.7795).astype(int)
+        return types.SimpleNamespace(
+            joint_state=types.SimpleNamespace(
+                joint_1=int(joint[0]),
+                joint_2=int(joint[1]),
+                joint_3=int(joint[2]),
+                joint_4=int(joint[3]),
+                joint_5=int(joint[4]),
+                joint_6=int(joint[5]),
+            )
+        )
 
-    def GripperCtrl(self, *_args):
-        pass
+    def GetArmGripperMsgs(self):
+        return types.SimpleNamespace(
+            gripper_state=types.SimpleNamespace(
+                grippers_angle=int(round(self.feedback_gripper * 70 * 1000))
+            )
+        )
+
+    def GetArmGripperCtrl(self):
+        return types.SimpleNamespace(
+            Hz=0.0,
+            gripper_ctrl=types.SimpleNamespace(
+                grippers_angle=int(round(self.feedback_gripper * 70 * 1000))
+            ),
+        )
+
+    def JointCtrl(self, *joints):
+        self.events.append(("joint", tuple(joints)))
+        self.feedback_joint = np.asarray(joints, dtype=float) / 57295.7795
+
+    def GripperCtrl(self, angle, *args):
+        self.events.append(("gripper", (angle, *args)))
+        self.feedback_gripper = float(angle) / (70 * 1000)
 
     def EnableArm(self, _motor_num):
         pass
@@ -754,8 +800,14 @@ class FakeControllerWrapper:
     def __init__(self):
         self.controller = FakeSdk()
 
+    def get_state(self):
+        return {
+            "joint": self.controller.feedback_joint.copy(),
+            "gripper": float(self.controller.feedback_gripper),
+        }
 
-def test_piper_dagger_policy_send_uses_mit_for_follower(monkeypatch):
+
+def _load_piper_dagger_module():
     class StubRobot:
         pass
 
@@ -781,149 +833,167 @@ def test_piper_dagger_policy_send_uses_mit_for_follower(monkeypatch):
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = old_module
-    PiperDAgger = piper_module.PiperDAgger
+    return piper_module
 
-    robot = PiperDAgger.__new__(PiperDAgger)
+
+def _make_piper_dagger_robot(piper_module):
+    robot = piper_module.PiperDAgger.__new__(piper_module.PiperDAgger)
     robot._policy_enabled = True
-    robot._sync_master_with_policy_commands = True
     robot._follower_gripper_effort = 5000
     robot._master_gripper_effort = 1000
     robot.follower_use_mit_mode = True
     follower = FakeControllerWrapper()
     master = FakeControllerWrapper()
     robot.controllers = {"arm": {"left_arm": follower, "right_arm": master}}
+    robot.reassert_follower_hold = lambda: None
+    return robot, follower, master
+
+
+def test_piper_dagger_autonomous_moves_only_follower_in_mit():
+    piper_module = _load_piper_dagger_module()
+    robot, follower, master = _make_piper_dagger_robot(piper_module)
     command = {"joint": np.arange(6, dtype=float) / 10, "gripper": 0.5}
+    initial_master_state = master.get_state()
 
     sent = robot.move_follower(command)
 
-    assert master.controller.mode_flags == [0x00]
+    assert master.controller.events == []
+    np.testing.assert_allclose(master.get_state()["joint"], initial_master_state["joint"])
+    assert master.get_state()["gripper"] == initial_master_state["gripper"]
     assert follower.controller.mode_flags == [0xAD]
     np.testing.assert_allclose(
         sent,
         np.concatenate([np.arange(6, dtype=np.float32) / 10, [0.5]]),
     )
 
+
+def test_piper_dagger_alignment_ramp_is_bounded(monkeypatch):
+    piper_module = _load_piper_dagger_module()
+    robot, _follower, master = _make_piper_dagger_robot(piper_module)
     monkeypatch.setattr(piper_module.time, "sleep", lambda _seconds: None)
-    aligned_state = {"joint": np.zeros(6), "gripper": 0.0}
-    alignment_commands = []
-    original_send_arm_target = robot._send_arm_target
-
-    def track_alignment(_controller, move_data, **_kwargs):
-        aligned_state["joint"] = np.asarray(move_data["joint"], dtype=float).copy()
-        aligned_state["gripper"] = float(move_data["gripper"])
-        alignment_commands.append(aligned_state["joint"].copy())
-
-    robot.get_master_state = lambda: aligned_state
-    robot._send_arm_target = track_alignment
     follower_target = {
         "joint": np.array([0.05, -0.04, 0.03, -0.02, 0.01, 0.0]),
         "gripper": 0.08,
     }
+
     robot.align_master_to_follower(
         follower_target,
-        fps=50,
-        max_joint_step=0.01,
-        settle_seconds=0,
-        timeout=1.0,
+        speed=60,
     )
 
-    command_steps = np.diff(np.vstack([np.zeros(6), alignment_commands]), axis=0)
-    assert np.max(np.abs(command_steps)) <= 0.010001
-    np.testing.assert_allclose(alignment_commands[-1], follower_target["joint"])
-    assert aligned_state["gripper"] == follower_target["gripper"]
-
-    aligned_state["joint"] = np.full(6, 0.2)
-    aligned_state["gripper"] = 0.0
-    alignment_commands.clear()
-    role_settled = False
-
-    def move_during_role_settle(seconds):
-        nonlocal role_settled
-        if seconds == 0.5 and not role_settled:
-            aligned_state["joint"] = np.full(6, 0.3)
-            role_settled = True
-
-    monkeypatch.setattr(piper_module.time, "sleep", move_during_role_settle)
-    robot.align_master_to_follower(
-        {"joint": np.zeros(6), "gripper": 0.0},
-        fps=50,
-        max_joint_step=0.01,
-        settle_seconds=0,
-        timeout=2.0,
+    joint_commands = [
+        np.asarray(event[1], dtype=float) / 57295.7795
+        for event in master.controller.events
+        if event[0] == "joint"
+    ]
+    command_steps = np.diff(np.vstack([np.zeros(6), joint_commands]), axis=0)
+    assert np.max(np.abs(command_steps)) <= 2501 / 57295.7795
+    np.testing.assert_allclose(joint_commands[-1], follower_target["joint"], atol=2e-5)
+    assert master.controller.feedback_gripper == pytest.approx(
+        follower_target["gripper"], abs=2e-5
     )
-    assert role_settled
-    np.testing.assert_allclose(alignment_commands[0], np.full(6, 0.2))
-    assert np.max(np.abs(alignment_commands[1] - np.full(6, 0.3))) <= 0.010001
+    assert master.controller.master_slave_calls == [
+        (piper_module.FOLLOWER_ROLE, 0x00, 0x00, 0x00)
+    ]
+    assert master.controller.mode_flags
+    assert set(master.controller.mode_flags) == {0x00}
 
-    monkeypatch.setattr(piper_module.time, "sleep", lambda _seconds: None)
-    alignment_commands.clear()
-    with pytest.raises(TimeoutError, match="exceeds timeout before motion"):
+    master.controller.events.clear()
+    master.controller.JointCtrl = lambda *joints: master.controller.events.append(
+        ("joint", tuple(joints))
+    )
+    with pytest.raises(TimeoutError, match="after 3 ramp attempts"):
         robot.align_master_to_follower(
             {"joint": np.ones(6), "gripper": 1.0},
-            fps=50,
-            max_joint_step=0.01,
-            settle_seconds=0,
-            timeout=0.1,
+            speed=60,
         )
-    assert len(alignment_commands) == 1
+    assert len([event for event in master.controller.events if event[0] == "joint"]) > 1
 
-    robot._send_arm_target = original_send_arm_target
-    master.controller.events.clear()
-    master.controller.master_slave_calls.clear()
-    master.controller.motion_ctrl_1_calls.clear()
-    robot.reset_intervention_tracking = lambda: None
-    robot.get_master_state = lambda: {
-        "joint": np.arange(6, dtype=float) / 10,
-        "gripper": 0.5,
-    }
-    ctrl_timestamp_before_switch = robot.enable_master_drag_mode(
-        master_already_aligned=True
+
+def test_piper_dagger_feedback_takeover_repeats_for_two_episodes(monkeypatch):
+    piper_module = _load_piper_dagger_module()
+    robot, follower, master = _make_piper_dagger_robot(piper_module)
+    monkeypatch.setattr(piper_module.time, "sleep", lambda _seconds: None)
+    fixed_ctrl_timestamp = master.controller.joint_ctrl_timestamp
+    episode_targets = (
+        np.array([0.05, -0.04, 0.03, -0.02, 0.01, 0.0]),
+        np.array([-0.03, 0.06, -0.02, 0.04, -0.01, 0.02]),
     )
 
-    assert ctrl_timestamp_before_switch == 12.5
-    assert master.controller.master_slave_calls == [
-        (piper_module.MASTER_ROLE, 0x00, 0x00, 0x00)
-    ]
-    assert master.controller.motion_ctrl_1_calls == []
-    assert master.controller.motion_ctrl_2_calls[-1] == (0x00, 0x01, 0, 0x00)
-    assert master.controller.events[:2] == [("motion2", 0x00), ("role", 0xFA)]
-    assert master.controller.joint_ctrl_timestamp == 13.5
-    assert master.controller.teaching_param_calls == [
-        {
-            "teaching_range_per": 100,
-            "max_range_config": 70,
-            "teaching_friction": 1,
+    for episode_index, target_joint in enumerate(episode_targets):
+        # The reset script puts the master at init. Autonomous policy movement
+        # must affect only the follower until Space starts takeover.
+        master.controller.feedback_joint = np.zeros(6, dtype=float)
+        master.controller.feedback_gripper = 0.0
+        master.controller.events.clear()
+        master.controller.mode_flags.clear()
+        master.controller.motion_ctrl_1_calls.clear()
+        master.controller.motion_ctrl_2_calls.clear()
+        master.controller.master_slave_calls.clear()
+
+        policy_action = {
+            "joint": target_joint,
+            "gripper": 0.2 + 0.1 * episode_index,
         }
-    ]
+        robot.set_policy_enabled(True)
+        robot.move_follower(policy_action)
+        assert master.controller.events == []
+        np.testing.assert_allclose(master.get_state()["joint"], np.zeros(6))
 
-    master.controller.events.clear()
-    robot.retry_master_input_role()
-    assert master.controller.master_slave_calls[-1] == (
-        piper_module.MASTER_ROLE,
-        0x00,
-        0x00,
-        0x00,
-    )
-    assert master.controller.motion_ctrl_1_calls == []
-    assert master.controller.events == [
-        ("motion2", 0x00),
-        ("role", 0xFA),
-    ]
-    assert master.controller.joint_ctrl_timestamp == 14.5
+        frozen_follower = follower.get_state()
+        robot.set_policy_enabled(False)
+        robot.align_master_to_follower(
+            frozen_follower,
+            speed=60,
+        )
+        robot.enable_master_drag_mode()
 
-    robot.reassert_follower_hold = lambda: None
-    robot.get_master_input_state = robot.get_master_state
-    robot.disable_master_drag_mode()
-    robot.enable_master_drag_mode()
-    assert master.controller.motion_ctrl_1_calls == []
-    assert master.controller.joint_ctrl_timestamp == 15.5
+        np.testing.assert_allclose(
+            master.get_state()["joint"], frozen_follower["joint"], atol=2e-5
+        )
+        assert master.controller.master_slave_calls == [
+            (piper_module.FOLLOWER_ROLE, 0x00, 0x00, 0x00),
+            (piper_module.MASTER_ROLE, 0x00, 0x00, 0x00),
+        ]
+        assert master.controller.motion_ctrl_1_calls == []
+        assert master.controller.motion_ctrl_2_calls
+        assert all(call[0] == 0x01 and call[3] == 0x00 for call in master.controller.motion_ctrl_2_calls)
+        assert master.controller.joint_ctrl_timestamp == fixed_ctrl_timestamp
 
-    get_fresh_status = master.controller.GetArmStatus
-    stale_status = get_fresh_status()
-    master.controller.GetArmStatus = lambda: stale_status
-    with pytest.raises(TimeoutError, match="fresh standby state"):
-        PiperDAgger._wait_master_standby(master.controller, timeout=0.001)
-    master.controller.GetArmStatus = get_fresh_status
+        baseline = DAGGER._read_master_feedback_action(master)
+        assert baseline is not None and baseline[2] == "feedback"
+        mapping = DAGGER.TeleopMapping(
+            joint_sign=[1] * 6,
+            joint_offset=[0] * 6,
+            joint_scale=1,
+            gripper_scale=1,
+            gripper_offset=0,
+        )
+        mapping.align(baseline, frozen_follower)
+
+        master.controller.feedback_joint = target_joint + 0.02
+        master.controller.feedback_gripper = policy_action["gripper"] + 0.05
+        dragged = DAGGER._read_master_feedback_action(master)
+        sent = robot.move_follower(mapping.transform(dragged), bypass_policy=True)
+        np.testing.assert_allclose(sent[:6], target_joint + 0.02, atol=2e-5)
+        assert sent[6] == pytest.approx(policy_action["gripper"] + 0.05, abs=2e-5)
+        assert follower.controller.mode_flags[-1] == 0xAD
+
+        robot.disable_master_drag_mode()
+        assert master.controller.master_slave_calls[-1] == (
+            piper_module.FOLLOWER_ROLE,
+            0x00,
+            0x00,
+            0x00,
+        )
+        assert master.controller.motion_ctrl_2_calls[-1][0] == 0x01
+        assert master.controller.motion_ctrl_2_calls[-1][3] == 0x00
+        assert master.controller.joint_ctrl_timestamp == fixed_ctrl_timestamp
+
+
+def test_checked_can_send_raises_on_failure():
+    piper_module = _load_piper_dagger_module()
+    PiperDAgger = piper_module.PiperDAgger
 
     can_bus = FakeCanBus()
 

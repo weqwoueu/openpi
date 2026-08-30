@@ -649,40 +649,6 @@ def save_dagger_episode(collector, success: bool, tracker: DaggerEpisodeTracker 
     return True
 
 
-def _read_master_ctrl_action(
-    master,
-    *,
-    after_timestamp: float | None = None,
-    fallback_gripper: float | None = None,
-):
-    ctrl = master.controller.GetArmJointCtrl()
-    ctrl_timestamp = float(getattr(ctrl, "time_stamp", 0.0))
-    if ctrl_timestamp <= 0:
-        return None
-    if after_timestamp is not None and ctrl_timestamp <= after_timestamp:
-        return None
-    joints = ctrl.joint_ctrl
-    joint = np.asarray(
-        [
-            joints.joint_1,
-            joints.joint_2,
-            joints.joint_3,
-            joints.joint_4,
-            joints.joint_5,
-            joints.joint_6,
-        ],
-        dtype=float,
-    ) / 57295.7795
-    gripper_ctrl = master.controller.GetArmGripperCtrl()
-    if getattr(gripper_ctrl, "Hz", 0) > 0:
-        gripper = float(gripper_ctrl.gripper_ctrl.grippers_angle) / (70 * 1000)
-    elif fallback_gripper is not None:
-        gripper = float(fallback_gripper)
-    else:
-        return None
-    return joint, gripper, "ctrl"
-
-
 def _read_master_feedback_action(master):
     try:
         state = master.get_state()
@@ -755,15 +721,7 @@ class DaggerRuntime:
         teleop_fps: float,
         chunk_size: int,
         reset_settle_seconds: float,
-        alignment_timeout: float,
-        gripper_frame_fallback: bool,
-        master_role_retries: int,
-        master_role_retry_interval: float,
-        takeover_align_enabled: bool,
-        takeover_align_fps: float,
-        takeover_align_max_joint_step: float,
-        takeover_align_settle_seconds: float,
-        takeover_align_timeout: float,
+        takeover_align_speed: int,
         teleop_mapping: TeleopMapping,
         filter_kwargs: dict,
         prefetch_threshold: int = 0,
@@ -788,19 +746,7 @@ class DaggerRuntime:
             if reset_script is not None
             else CONTROL_ROOT / "scripts" / "piperx" / "2_arm_go_init.sh"
         )
-        self.alignment_timeout = float(alignment_timeout)
-        self.gripper_frame_fallback = bool(gripper_frame_fallback)
-        self.master_role_retries = int(master_role_retries)
-        self.master_role_retry_interval = float(master_role_retry_interval)
-        if self.master_role_retries < 0:
-            raise ValueError("master_role_retries must be non-negative")
-        if self.master_role_retry_interval <= 0:
-            raise ValueError("master_role_retry_interval must be positive")
-        self.takeover_align_enabled = bool(takeover_align_enabled)
-        self.takeover_align_fps = float(takeover_align_fps)
-        self.takeover_align_max_joint_step = float(takeover_align_max_joint_step)
-        self.takeover_align_settle_seconds = float(takeover_align_settle_seconds)
-        self.takeover_align_timeout = float(takeover_align_timeout)
+        self.takeover_align_speed = int(takeover_align_speed)
         self.teleop_mapping = teleop_mapping
         self.filter_kwargs = dict(filter_kwargs)
         self.generation = 0
@@ -813,7 +759,6 @@ class DaggerRuntime:
         self._teleop_loop = None
         self._teleop_errors: queue.Queue[BaseException] = queue.Queue(maxsize=1)
         self._master_drag_enabled = False
-        self._last_master_gripper = None
 
     def start_episode(self, generation: int):
         self.stop_active_control(restore_master=True)
@@ -913,32 +858,25 @@ class DaggerRuntime:
         self._invalidate_policy(generation)
         self.robot.set_policy_enabled(False)
         master = self.robot.controllers["arm"]["right_arm"]
-        self._last_master_gripper = float(self.robot.get_master_state()["gripper"])
         follower_state = self.robot.get_follower_state()
         self.robot.hold_follower_position()
         # Mark the transition as active before any mode command so a failed
         # alignment or role switch is restored through the same cleanup path.
         self._master_drag_enabled = True
         try:
-            if self.takeover_align_enabled:
-                self.robot.align_master_to_follower(
-                    follower_state,
-                    fps=self.takeover_align_fps,
-                    max_joint_step=self.takeover_align_max_joint_step,
-                    settle_seconds=self.takeover_align_settle_seconds,
-                    timeout=self.takeover_align_timeout,
-                )
-            previous_ctrl_timestamp = self.robot.enable_master_drag_mode(
-                master_already_aligned=self.takeover_align_enabled
+            self.robot.align_master_to_follower(
+                follower_state,
+                speed=self.takeover_align_speed,
             )
+            self.robot.enable_master_drag_mode()
         except TimeoutError as error:
             raise TakeoverTransitionError(
                 f"master alignment or input-role transition failed: {error}"
             ) from error
 
-        master_raw = self._wait_for_master_action(
-            master, after_ctrl_timestamp=previous_ctrl_timestamp
-        )
+        master_raw = _read_master_feedback_action(master)
+        if master_raw is None:
+            raise TakeoverTransitionError("master feedback is unavailable after 0xFA")
         follower_state = self.robot.get_follower_state()
         self.teleop_mapping.align(master_raw, follower_state)
 
@@ -969,74 +907,8 @@ class DaggerRuntime:
         self._teleop_loop.start()
         self._next_sample_at = time.monotonic() + self.sample_period
 
-    def _wait_for_master_action(self, master, *, after_ctrl_timestamp: float):
-        deadline = time.monotonic() + self.alignment_timeout
-        next_retry_at = time.monotonic() + self.master_role_retry_interval
-        retries = 0
-        while time.monotonic() < deadline:
-            action = self._read_master_ctrl_action(
-                master,
-                after_timestamp=after_ctrl_timestamp,
-            )
-            if action is not None:
-                # Joint pairs arrive in three CAN frames. Give the rest of the
-                # current frame group time to update before taking the baseline.
-                time.sleep(0.03)
-                return self._read_master_ctrl_action(master) or action
-
-            now = time.monotonic()
-            if retries < self.master_role_retries and now >= next_retry_at:
-                retries += 1
-                print(
-                    f"[mode] no new master frame; retrying standby -> input role "
-                    f"({retries}/{self.master_role_retries})"
-                )
-                try:
-                    self.robot.retry_master_input_role()
-                except TimeoutError as error:
-                    raise TakeoverTransitionError(
-                        f"master input-role retry failed: {error}"
-                    ) from error
-                next_retry_at = time.monotonic() + self.master_role_retry_interval
-            time.sleep(0.02)
-
-        try:
-            ctrl = master.controller.GetArmJointCtrl()
-            gripper_ctrl = master.controller.GetArmGripperCtrl()
-            arm_status = master.controller.GetArmStatus().arm_status
-            readiness = (
-                f"role_retries={retries}, "
-                f"joint_hz={getattr(ctrl, 'Hz', 0):.1f}, "
-                f"joint_timestamp={getattr(ctrl, 'time_stamp', 0.0):.6f}, "
-                f"previous_timestamp={after_ctrl_timestamp:.6f}, "
-                f"gripper_hz={getattr(gripper_ctrl, 'Hz', 0):.1f}, "
-                f"ctrl_mode=0x{int(arm_status.ctrl_mode):02X}, "
-                f"teach_status=0x{int(arm_status.teach_status):02X}, "
-                f"motion_status=0x{int(arm_status.motion_status):02X}"
-            )
-        except Exception as error:
-            readiness = f"readiness query failed: {error}"
-        raise TakeoverTransitionError(
-            "no new master control frame after switching to input role; "
-            + readiness
-        )
-
-    def _read_master_ctrl_action(self, master, *, after_timestamp: float | None = None):
-        action = _read_master_ctrl_action(
-            master,
-            after_timestamp=after_timestamp,
-            fallback_gripper=(
-                self._last_master_gripper if self.gripper_frame_fallback else None
-            ),
-        )
-        if action is not None:
-            self._last_master_gripper = float(action[1])
-        return action
-
     def _read_aligned_master_action(self, master):
-        if self.teleop_mapping.source == "feedback":
-            return _read_master_feedback_action(master)
-        return self._read_master_ctrl_action(master)
+        return _read_master_feedback_action(master)
 
     def tick_intervention(self):
         try:
@@ -1163,15 +1035,7 @@ def _build_parser():
     parser.add_argument("--target-intervention-success", type=int, default=-1)
     parser.add_argument("--target-intervention-failure", type=int, default=-1)
     parser.add_argument("--reset-settle-seconds", type=float, default=2.0)
-    parser.add_argument("--alignment-timeout", type=float, default=5.0)
-    parser.add_argument("--gripper-frame-fallback", type=_parse_bool, default=True)
-    parser.add_argument("--master-role-retries", type=int, default=3)
-    parser.add_argument("--master-role-retry-interval", type=float, default=1.0)
-    parser.add_argument("--takeover-align-enabled", type=_parse_bool, default=True)
-    parser.add_argument("--takeover-align-fps", type=float, default=50.0)
-    parser.add_argument("--takeover-align-max-joint-step", type=float, default=0.01)
-    parser.add_argument("--takeover-align-settle-seconds", type=float, default=0.5)
-    parser.add_argument("--takeover-align-timeout", type=float, default=8.0)
+    parser.add_argument("--takeover-align-speed", type=int, default=60)
     parser.add_argument("--adv-ind", default=None, help="optional inference condition; raw dataset still stores none")
     parser.add_argument("--ema-enabled", type=_parse_bool, default=True)
     parser.add_argument("--ema-alpha", type=float, default=0.8)
@@ -1198,13 +1062,8 @@ def main():
         raise SystemExit("--chunk-size must be positive")
     if not 0 <= args.prefetch_threshold < args.chunk_size:
         raise SystemExit("--prefetch-threshold must be in [0, chunk-size)")
-    if args.takeover_align_enabled and (
-        args.takeover_align_fps <= 0
-        or args.takeover_align_max_joint_step <= 0
-        or args.takeover_align_settle_seconds < 0
-        or args.takeover_align_timeout <= 0
-    ):
-        raise SystemExit("invalid takeover alignment settings")
+    if not 1 <= args.takeover_align_speed <= 100:
+        raise SystemExit("--takeover-align-speed must be in [1, 100]")
     if args.num_episode == 0 or args.num_episode < -1:
         raise SystemExit("--num-episode must be -1 or a positive integer")
     if args.max_step == 0 or args.max_step < -1:
@@ -1292,15 +1151,7 @@ def main():
             prefetch_threshold=args.prefetch_threshold,
             reset_settle_seconds=args.reset_settle_seconds,
             reset_script=CONTROL_ROOT / "scripts" / "piperx" / "2_arm_go_init.sh",
-            alignment_timeout=args.alignment_timeout,
-            gripper_frame_fallback=args.gripper_frame_fallback,
-            master_role_retries=args.master_role_retries,
-            master_role_retry_interval=args.master_role_retry_interval,
-            takeover_align_enabled=args.takeover_align_enabled,
-            takeover_align_fps=args.takeover_align_fps,
-            takeover_align_max_joint_step=args.takeover_align_max_joint_step,
-            takeover_align_settle_seconds=args.takeover_align_settle_seconds,
-            takeover_align_timeout=args.takeover_align_timeout,
+            takeover_align_speed=args.takeover_align_speed,
             teleop_mapping=TeleopMapping(
                 joint_sign=args.joint_sign,
                 joint_offset=args.joint_offset,

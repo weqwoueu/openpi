@@ -33,20 +33,8 @@ TARGET_INTERVENTION_SUCCESS=50
 TARGET_INTERVENTION_FAILURE=-1
 
 RESET_SETTLE_SECONDS=2.0
-# Maximum time to wait for a new 0xFA master joint-control frame.
-ALIGNMENT_TIMEOUT=5.0
-# true: use the pre-switch gripper value until the 0x159 gripper frame is ready.
-# This never allows stale joint frames to pass the takeover check.
-GRIPPER_FRAME_FALLBACK=true
-# Retry standby -> 0xFA when no new native master frame appears.
-MASTER_ROLE_RETRIES=3
-MASTER_ROLE_RETRY_INTERVAL=1.0
-# Before 0xFA, move the master to the follower's frozen feedback pose.
-TAKEOVER_ALIGN_ENABLED=true
-TAKEOVER_ALIGN_FPS=50
-TAKEOVER_ALIGN_MAX_JOINT_STEP=0.01
-TAKEOVER_ALIGN_SETTLE_SECONDS=0.5
-TAKEOVER_ALIGN_TIMEOUT=8.0
+# Before 0xFA, ramp the master from init to the follower feedback pose.
+TAKEOVER_ALIGN_SPEED=60
 
 # Ordinary pi0.5 SFT: leave empty. PiStar inference: for example positive.
 # This affects inference only. Saved raw data always uses adv_ind=none.
@@ -106,15 +94,7 @@ args=(
     --target-intervention-success "$TARGET_INTERVENTION_SUCCESS"
     --target-intervention-failure "$TARGET_INTERVENTION_FAILURE"
     --reset-settle-seconds "$RESET_SETTLE_SECONDS"
-    --alignment-timeout "$ALIGNMENT_TIMEOUT"
-    --gripper-frame-fallback "$GRIPPER_FRAME_FALLBACK"
-    --master-role-retries "$MASTER_ROLE_RETRIES"
-    --master-role-retry-interval "$MASTER_ROLE_RETRY_INTERVAL"
-    --takeover-align-enabled "$TAKEOVER_ALIGN_ENABLED"
-    --takeover-align-fps "$TAKEOVER_ALIGN_FPS"
-    --takeover-align-max-joint-step "$TAKEOVER_ALIGN_MAX_JOINT_STEP"
-    --takeover-align-settle-seconds "$TAKEOVER_ALIGN_SETTLE_SECONDS"
-    --takeover-align-timeout "$TAKEOVER_ALIGN_TIMEOUT"
+    --takeover-align-speed "$TAKEOVER_ALIGN_SPEED"
     --ema-enabled "$EMA_ENABLED"
     --ema-alpha "$EMA_ALPHA"
     --slew-enabled "$SLEW_ENABLED"
