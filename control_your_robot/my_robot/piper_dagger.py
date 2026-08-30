@@ -227,8 +227,8 @@ class PiperDAgger(Robot):
 
     def reset_master_input_tracking(self):
         self._teach_ctrl_ready = True
-        self._teach_mode_started_at = 0.0
         self._last_good_master_sdk = None
+        self._teach_ctrl_snapshot_sdk = None
 
     def _read_master_feedback_sdk(self):
         master = self.controllers["arm"]["right_arm"].controller
@@ -279,14 +279,32 @@ class PiperDAgger(Robot):
 
     def notify_master_teach_mode_started(self):
         self._teach_ctrl_ready = False
-        self._teach_mode_started_at = time.monotonic()
         self._last_good_master_sdk = None
+        self._teach_ctrl_snapshot_sdk = self._read_master_ctrl_sdk()
         feedback = self._read_master_feedback_sdk()
         if feedback is not None:
             self._last_good_master_sdk = feedback.copy()
 
+    def _master_ctrl_changed_since_teach_start(self, ctrl):
+        if self._teach_ctrl_snapshot_sdk is None:
+            return False
+        joint_change = float(
+            np.max(np.abs(ctrl[:6] - self._teach_ctrl_snapshot_sdk[:6]))
+        )
+        gripper_change = abs(float(ctrl[6] - self._teach_ctrl_snapshot_sdk[6]))
+        return joint_change >= 200 or gripper_change >= 500
+
+    def _master_ctrl_is_ready(self, ctrl):
+        if self._teach_ctrl_ready:
+            return True
+        if not np.any(np.abs(ctrl[:6]) > 1e-6):
+            return False
+        if self._master_ctrl_changed_since_teach_start(ctrl):
+            self._teach_ctrl_ready = True
+        return self._teach_ctrl_ready
+
     def get_master_input_action(self):
-        """Select master feedback/ctrl exactly as robocoin's Piper leader does."""
+        """Use feedback until the 0xFA control stream is demonstrably live."""
         feedback = self._read_master_feedback_sdk()
         ctrl = self._read_master_ctrl_sdk()
 
@@ -296,36 +314,21 @@ class PiperDAgger(Robot):
         selected = None
         source = "feedback"
         if feedback is not None and ctrl is not None:
-            ctrl_nonzero = np.any(np.abs(ctrl[:6]) > 1e-6)
-            if ctrl_nonzero:
-                if not self._teach_ctrl_ready:
-                    elapsed = time.monotonic() - self._teach_mode_started_at
-                    if self._last_good_master_sdk is not None:
-                        max_diff = float(
-                            np.max(np.abs(ctrl[:6] - self._last_good_master_sdk[:6]))
-                        )
-                        if max_diff < 6000 or elapsed > 1.5:
-                            self._teach_ctrl_ready = True
-                    elif elapsed > 1.0:
-                        self._teach_ctrl_ready = True
-                    if not self._teach_ctrl_ready:
-                        selected = (
-                            self._last_good_master_sdk
-                            if self._last_good_master_sdk is not None
-                            else feedback
-                        )
-                if self._teach_ctrl_ready:
-                    selected = ctrl
-                    source = "ctrl"
-            else:
-                selected = feedback
-        elif ctrl is not None:
-            ctrl_nonzero = np.any(np.abs(ctrl[:6]) > 1e-6)
-            if not ctrl_nonzero and self._last_good_master_sdk is not None:
-                selected = self._last_good_master_sdk
-            else:
+            if self._master_ctrl_is_ready(ctrl):
                 selected = ctrl
                 source = "ctrl"
+            else:
+                selected = (
+                    self._last_good_master_sdk
+                    if self._last_good_master_sdk is not None
+                    else feedback
+                )
+        elif ctrl is not None:
+            if self._master_ctrl_is_ready(ctrl):
+                selected = ctrl
+                source = "ctrl"
+            elif self._last_good_master_sdk is not None:
+                selected = self._last_good_master_sdk
         elif feedback is not None:
             selected = feedback
         elif self._last_good_master_sdk is not None:

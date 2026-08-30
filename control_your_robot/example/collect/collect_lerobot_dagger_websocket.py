@@ -927,7 +927,7 @@ class DaggerRuntime:
                 raw_action = self._read_aligned_master_action(master)
                 if raw_action is None:
                     return None
-                move_data = action_filter.process(self.teleop_mapping.transform(raw_action))
+                move_data = self._process_master_action(raw_action, action_filter)
                 sent_action = self.robot.move_follower(move_data, bypass_policy=True)
                 if sent_action is None:
                     raise RuntimeError("expert command was rejected before CAN send")
@@ -945,6 +945,18 @@ class DaggerRuntime:
 
     def _read_aligned_master_action(self, master):
         return self.robot.get_master_input_action()
+
+    def _process_master_action(self, raw_action, action_filter):
+        if raw_action[2] != self.teleop_mapping.source:
+            follower_state = self.robot.get_follower_state()
+            previous_source = self.teleop_mapping.source
+            self.teleop_mapping.align(raw_action, follower_state)
+            action_filter.seed(follower_state["joint"], follower_state["gripper"])
+            print(
+                "[mode] master input source changed: "
+                f"{previous_source} -> {raw_action[2]}; teleop baseline rebased"
+            )
+        return action_filter.process(self.teleop_mapping.transform(raw_action))
 
     def tick_intervention(self):
         try:

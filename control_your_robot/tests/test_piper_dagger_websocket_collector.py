@@ -666,6 +666,44 @@ def test_teleop_mapping_starts_at_follower_and_preserves_master_delta():
     assert moved["gripper"] == 0.7
 
 
+def test_runtime_reanchors_first_feedback_to_ctrl_frame_without_jump():
+    from robot.utils.teleop_filter import EmaSlewFilter
+
+    class SourceSwitchRobot(FakeRobot):
+        def __init__(self):
+            super().__init__()
+            self.follower_state = {
+                "joint": np.full(6, 0.7, dtype=float),
+                "gripper": 0.6,
+            }
+
+        def get_follower_state(self):
+            return {
+                "joint": np.asarray(self.follower_state["joint"], dtype=float).copy(),
+                "gripper": float(self.follower_state["gripper"]),
+            }
+
+    robot = SourceSwitchRobot()
+    runtime = _make_runtime(robot=robot)
+    runtime.teleop_mapping.align(
+        (np.full(6, 1.0), 0.2, "feedback"),
+        {"joint": np.full(6, 0.5), "gripper": 0.4},
+    )
+    action_filter = EmaSlewFilter(ema_enabled=False, slew_enabled=False)
+    action_filter.seed(np.full(6, 0.5), 0.4)
+
+    first_ctrl = (np.full(6, 2.0), 0.8, "ctrl")
+    first_move = runtime._process_master_action(first_ctrl, action_filter)
+    np.testing.assert_allclose(first_move["joint"], robot.follower_state["joint"])
+    assert first_move["gripper"] == pytest.approx(robot.follower_state["gripper"])
+    assert runtime.teleop_mapping.source == "ctrl"
+
+    next_ctrl = (np.full(6, 2.1), 0.9, "ctrl")
+    next_move = runtime._process_master_action(next_ctrl, action_filter)
+    np.testing.assert_allclose(next_move["joint"], robot.follower_state["joint"] + 0.1)
+    assert next_move["gripper"] == pytest.approx(robot.follower_state["gripper"] + 0.1)
+
+
 class FakeSdk:
     def __init__(self):
         self.events = []
@@ -849,27 +887,52 @@ def _make_piper_dagger_robot(piper_module):
     return robot, follower, master
 
 
-def test_piper_dagger_master_input_uses_feedback_until_ctrl_is_valid(monkeypatch):
+def test_piper_dagger_stale_ctrl_stays_on_feedback_after_timeout(monkeypatch):
     piper_module = _load_piper_dagger_module()
     robot, _follower, master = _make_piper_dagger_robot(piper_module)
-    monkeypatch.setattr(piper_module.time, "sleep", lambda _seconds: None)
-    feedback_joint = np.linspace(-0.2, 0.3, 6)
+    now = [10.0]
+    monkeypatch.setattr(piper_module.time, "monotonic", lambda: now[0])
+    stale_ctrl_joint = np.linspace(-0.1, 0.15, 6)
+    feedback_joint = stale_ctrl_joint.copy()
     master.controller.feedback_joint = feedback_joint.copy()
-    master.controller.feedback_gripper = 0.4
+    master.controller.feedback_gripper = 0.2
+    master.controller.ctrl_joint = stale_ctrl_joint.copy()
+    master.controller.ctrl_gripper = 0.2
+
+    robot.notify_master_teach_mode_started()
+    now[0] += 2.0
+    action = robot.get_master_input_action()
+
+    assert action is not None and action[2] == "feedback"
+    np.testing.assert_allclose(action[0], feedback_joint, atol=2e-5)
+    assert action[1] == pytest.approx(0.2, abs=2e-5)
+
+
+def test_piper_dagger_switches_to_ctrl_only_after_snapshot_changes(monkeypatch):
+    piper_module = _load_piper_dagger_module()
+    robot, _follower, master = _make_piper_dagger_robot(piper_module)
+    now = [10.0]
+    monkeypatch.setattr(piper_module.time, "monotonic", lambda: now[0])
+    ctrl_at_switch = np.linspace(-0.1, 0.15, 6)
+    feedback_joint = ctrl_at_switch.copy()
+    master.controller.feedback_joint = feedback_joint.copy()
+    master.controller.feedback_gripper = 0.2
+    master.controller.ctrl_joint = ctrl_at_switch.copy()
+    master.controller.ctrl_gripper = 0.2
 
     robot.notify_master_teach_mode_started()
     initial = robot.get_master_input_action()
     assert initial is not None and initial[2] == "feedback"
-    np.testing.assert_allclose(initial[0], feedback_joint, atol=2e-5)
-    assert initial[1] == pytest.approx(0.4, abs=2e-5)
 
-    ctrl_joint = feedback_joint + 0.01
-    master.controller.ctrl_joint = ctrl_joint.copy()
-    master.controller.ctrl_gripper = 0.45
+    moved_ctrl = ctrl_at_switch + 0.02
+    master.controller.ctrl_joint = moved_ctrl.copy()
+    master.controller.ctrl_gripper = 0.25
+    now[0] += 0.1
     ready = robot.get_master_input_action()
+
     assert ready is not None and ready[2] == "ctrl"
-    np.testing.assert_allclose(ready[0], ctrl_joint, atol=2e-5)
-    assert ready[1] == pytest.approx(0.45, abs=2e-5)
+    np.testing.assert_allclose(ready[0], moved_ctrl, atol=2e-5)
+    assert ready[1] == pytest.approx(0.25, abs=2e-5)
 
 
 def test_piper_dagger_all_zero_gate_allows_feedback_and_blocks_both_zero():
@@ -963,6 +1026,38 @@ def test_piper_dagger_master_input_reset_drops_previous_episode_cache(monkeypatc
     robot.notify_master_teach_mode_started()
 
     assert robot.get_master_input_action() is None
+
+
+def test_piper_dagger_second_episode_clears_ctrl_snapshot(monkeypatch):
+    piper_module = _load_piper_dagger_module()
+    robot, _follower, master = _make_piper_dagger_robot(piper_module)
+    now = [20.0]
+    monkeypatch.setattr(piper_module.time, "monotonic", lambda: now[0])
+
+    first_ctrl_snapshot = np.full(6, 0.1, dtype=float)
+    master.controller.feedback_joint = np.full(6, 0.4, dtype=float)
+    master.controller.feedback_gripper = 0.4
+    master.controller.ctrl_joint = first_ctrl_snapshot.copy()
+    master.controller.ctrl_gripper = 0.2
+    robot.notify_master_teach_mode_started()
+
+    master.controller.ctrl_joint = first_ctrl_snapshot + 0.02
+    master.controller.ctrl_gripper = 0.25
+    first_ready = robot.get_master_input_action()
+    assert first_ready is not None and first_ready[2] == "ctrl"
+
+    robot.reset_master_input_tracking()
+    second_feedback = master.controller.ctrl_joint.copy()
+    master.controller.feedback_joint = second_feedback.copy()
+    master.controller.feedback_gripper = master.controller.ctrl_gripper
+    # The last Ctrl value from episode one is the new episode's stale baseline.
+    robot.notify_master_teach_mode_started()
+    now[0] += 2.0
+    second_initial = robot.get_master_input_action()
+
+    assert second_initial is not None and second_initial[2] == "feedback"
+    np.testing.assert_allclose(second_initial[0], second_feedback, atol=2e-5)
+    assert second_initial[1] == pytest.approx(master.controller.ctrl_gripper, abs=2e-5)
 
 
 def test_piper_dagger_autonomous_moves_only_follower_in_mit():
