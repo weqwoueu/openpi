@@ -34,7 +34,19 @@ TARGET_INTERVENTION_FAILURE=-1
 
 RESET_SETTLE_SECONDS=2.0
 # Before 0xFA, ramp the master from init to the follower feedback pose.
-TAKEOVER_ALIGN_SPEED=60
+TAKEOVER_ALIGN_SPEED=30
+
+# Robocoin master-input readiness and feedback/ctrl handoff.
+MASTER_ALL_ZERO_ENABLED=true
+MASTER_ALL_ZERO_RAD_THRESH=0.001
+MASTER_ALL_ZERO_CHECK_JOINTS=6
+MASTER_STABLE_TIMEOUT=2.0
+MASTER_STABLE_POLL=0.05
+MASTER_STABLE_WARMUP=0.6
+MASTER_STABLE_READS=3
+MASTER_STABLE_MAX_JOINT_DELTA=0.06
+# PiStar gripper is normalized to 0..1; this equals robocoin's 0.015 m.
+MASTER_STABLE_MAX_GRIPPER_DELTA=0.21428571428571427
 
 # Ordinary pi0.5 SFT: leave empty. PiStar inference: for example positive.
 # This affects inference only. Saved raw data always uses adv_ind=none.
@@ -95,6 +107,15 @@ args=(
     --target-intervention-failure "$TARGET_INTERVENTION_FAILURE"
     --reset-settle-seconds "$RESET_SETTLE_SECONDS"
     --takeover-align-speed "$TAKEOVER_ALIGN_SPEED"
+    --master-all-zero-enabled "$MASTER_ALL_ZERO_ENABLED"
+    --master-all-zero-rad-thresh "$MASTER_ALL_ZERO_RAD_THRESH"
+    --master-all-zero-check-joints "$MASTER_ALL_ZERO_CHECK_JOINTS"
+    --master-stable-timeout "$MASTER_STABLE_TIMEOUT"
+    --master-stable-poll "$MASTER_STABLE_POLL"
+    --master-stable-warmup "$MASTER_STABLE_WARMUP"
+    --master-stable-reads "$MASTER_STABLE_READS"
+    --master-stable-max-joint-delta "$MASTER_STABLE_MAX_JOINT_DELTA"
+    --master-stable-max-gripper-delta "$MASTER_STABLE_MAX_GRIPPER_DELTA"
     --ema-enabled "$EMA_ENABLED"
     --ema-alpha "$EMA_ALPHA"
     --slew-enabled "$SLEW_ENABLED"

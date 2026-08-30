@@ -724,6 +724,15 @@ class DaggerRuntime:
         takeover_align_speed: int,
         teleop_mapping: TeleopMapping,
         filter_kwargs: dict,
+        master_all_zero_enabled: bool = True,
+        master_all_zero_rad_thresh: float = 0.001,
+        master_all_zero_check_joints: int = 6,
+        master_stable_timeout: float = 2.0,
+        master_stable_poll: float = 0.05,
+        master_stable_warmup: float = 0.6,
+        master_stable_reads: int = 3,
+        master_stable_max_joint_delta: float = 0.06,
+        master_stable_max_gripper_delta: float = 0.015 / 0.07,
         prefetch_threshold: int = 0,
         async_prefetch_enabled: bool = True,
         reset_script=None,
@@ -747,6 +756,15 @@ class DaggerRuntime:
             else CONTROL_ROOT / "scripts" / "piperx" / "2_arm_go_init.sh"
         )
         self.takeover_align_speed = int(takeover_align_speed)
+        self.master_all_zero_enabled = bool(master_all_zero_enabled)
+        self.master_all_zero_rad_thresh = float(master_all_zero_rad_thresh)
+        self.master_all_zero_check_joints = int(master_all_zero_check_joints)
+        self.master_stable_timeout = float(master_stable_timeout)
+        self.master_stable_poll = float(master_stable_poll)
+        self.master_stable_warmup = float(master_stable_warmup)
+        self.master_stable_reads = int(master_stable_reads)
+        self.master_stable_max_joint_delta = float(master_stable_max_joint_delta)
+        self.master_stable_max_gripper_delta = float(master_stable_max_gripper_delta)
         self.teleop_mapping = teleop_mapping
         self.filter_kwargs = dict(filter_kwargs)
         self.generation = 0
@@ -765,6 +783,9 @@ class DaggerRuntime:
         self._clear_teleop_errors()
         self.collector.clear_current_episode()
         self.robot.set_policy_enabled(False)
+        reset_master_input = getattr(self.robot, "reset_master_input_tracking", None)
+        if reset_master_input is not None:
+            reset_master_input()
         self._run_reset_script()
         if self.reset_settle_seconds > 0:
             time.sleep(self.reset_settle_seconds)
@@ -874,9 +895,24 @@ class DaggerRuntime:
                 f"master alignment or input-role transition failed: {error}"
             ) from error
 
-        master_raw = _read_master_feedback_action(master)
+        if self.master_all_zero_enabled:
+            invalid, reason = self.robot.master_input_invalid_all_zero(
+                rad_thresh=self.master_all_zero_rad_thresh,
+                first_n=self.master_all_zero_check_joints,
+            )
+            if invalid:
+                raise TakeoverTransitionError(f"master input is all-zero or unreadable: {reason}")
+
+        master_raw = self.robot.wait_master_input_stable(
+            timeout_s=self.master_stable_timeout,
+            poll_s=self.master_stable_poll,
+            warmup_sleep_s=self.master_stable_warmup,
+            stable_reads=self.master_stable_reads,
+            max_joint_delta=self.master_stable_max_joint_delta,
+            max_gripper_delta=self.master_stable_max_gripper_delta,
+        )
         if master_raw is None:
-            raise TakeoverTransitionError("master feedback is unavailable after 0xFA")
+            raise TakeoverTransitionError("master input did not become stable after 0xFA")
         follower_state = self.robot.get_follower_state()
         self.teleop_mapping.align(master_raw, follower_state)
 
@@ -908,7 +944,7 @@ class DaggerRuntime:
         self._next_sample_at = time.monotonic() + self.sample_period
 
     def _read_aligned_master_action(self, master):
-        return _read_master_feedback_action(master)
+        return self.robot.get_master_input_action()
 
     def tick_intervention(self):
         try:
@@ -1036,6 +1072,17 @@ def _build_parser():
     parser.add_argument("--target-intervention-failure", type=int, default=-1)
     parser.add_argument("--reset-settle-seconds", type=float, default=2.0)
     parser.add_argument("--takeover-align-speed", type=int, default=60)
+    parser.add_argument("--master-all-zero-enabled", type=_parse_bool, default=True)
+    parser.add_argument("--master-all-zero-rad-thresh", type=float, default=0.001)
+    parser.add_argument("--master-all-zero-check-joints", type=int, default=6)
+    parser.add_argument("--master-stable-timeout", type=float, default=2.0)
+    parser.add_argument("--master-stable-poll", type=float, default=0.05)
+    parser.add_argument("--master-stable-warmup", type=float, default=0.6)
+    parser.add_argument("--master-stable-reads", type=int, default=3)
+    parser.add_argument("--master-stable-max-joint-delta", type=float, default=0.06)
+    parser.add_argument(
+        "--master-stable-max-gripper-delta", type=float, default=0.015 / 0.07
+    )
     parser.add_argument("--adv-ind", default=None, help="optional inference condition; raw dataset still stores none")
     parser.add_argument("--ema-enabled", type=_parse_bool, default=True)
     parser.add_argument("--ema-alpha", type=float, default=0.8)
@@ -1064,6 +1111,19 @@ def main():
         raise SystemExit("--prefetch-threshold must be in [0, chunk-size)")
     if not 1 <= args.takeover_align_speed <= 100:
         raise SystemExit("--takeover-align-speed must be in [1, 100]")
+    if not 1 <= args.master_all_zero_check_joints <= 6:
+        raise SystemExit("--master-all-zero-check-joints must be in [1, 6]")
+    if args.master_all_zero_rad_thresh <= 0:
+        raise SystemExit("--master-all-zero-rad-thresh must be positive")
+    if (
+        args.master_stable_timeout <= 0
+        or args.master_stable_poll <= 0
+        or args.master_stable_warmup < 0
+        or args.master_stable_reads <= 0
+        or args.master_stable_max_joint_delta <= 0
+        or args.master_stable_max_gripper_delta <= 0
+    ):
+        raise SystemExit("master input stability settings are invalid")
     if args.num_episode == 0 or args.num_episode < -1:
         raise SystemExit("--num-episode must be -1 or a positive integer")
     if args.max_step == 0 or args.max_step < -1:
@@ -1152,6 +1212,15 @@ def main():
             reset_settle_seconds=args.reset_settle_seconds,
             reset_script=CONTROL_ROOT / "scripts" / "piperx" / "2_arm_go_init.sh",
             takeover_align_speed=args.takeover_align_speed,
+            master_all_zero_enabled=args.master_all_zero_enabled,
+            master_all_zero_rad_thresh=args.master_all_zero_rad_thresh,
+            master_all_zero_check_joints=args.master_all_zero_check_joints,
+            master_stable_timeout=args.master_stable_timeout,
+            master_stable_poll=args.master_stable_poll,
+            master_stable_warmup=args.master_stable_warmup,
+            master_stable_reads=args.master_stable_reads,
+            master_stable_max_joint_delta=args.master_stable_max_joint_delta,
+            master_stable_max_gripper_delta=args.master_stable_max_gripper_delta,
             teleop_mapping=TeleopMapping(
                 joint_sign=args.joint_sign,
                 joint_offset=args.joint_offset,

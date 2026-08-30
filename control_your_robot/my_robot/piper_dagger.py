@@ -60,6 +60,7 @@ class PiperDAgger(Robot):
             },
         }
         self._policy_enabled = True
+        self.reset_master_input_tracking()
         # Use a stronger follower gripper effort during rollout so grasping force
         # stays consistent while the arm is moving.
         self._follower_gripper_effort = 5000
@@ -217,8 +218,183 @@ class PiperDAgger(Robot):
         return self.controllers["arm"]["right_arm"].get_state()
 
     def get_master_input_state(self):
-        """Read the live master feedback while it is being dragged."""
-        return self.get_master_state()
+        """Read the live teaching input selected by the robocoin leader logic."""
+        action = self.get_master_input_action()
+        if action is None:
+            return self.get_master_state()
+        joint, gripper, _source = action
+        return {"joint": joint, "gripper": gripper}
+
+    def reset_master_input_tracking(self):
+        self._teach_ctrl_ready = True
+        self._teach_mode_started_at = 0.0
+        self._last_good_master_sdk = None
+
+    def _read_master_feedback_sdk(self):
+        master = self.controllers["arm"]["right_arm"].controller
+        try:
+            joint = master.GetArmJointMsgs().joint_state
+            gripper = master.GetArmGripperMsgs().gripper_state.grippers_angle
+            return np.asarray(
+                [
+                    joint.joint_1,
+                    joint.joint_2,
+                    joint.joint_3,
+                    joint.joint_4,
+                    joint.joint_5,
+                    joint.joint_6,
+                    gripper,
+                ],
+                dtype=float,
+            )
+        except Exception:
+            return None
+
+    def _read_master_ctrl_sdk(self):
+        master = self.controllers["arm"]["right_arm"].controller
+        try:
+            joint = master.GetArmJointCtrl().joint_ctrl
+            gripper = master.GetArmGripperCtrl().gripper_ctrl.grippers_angle
+            return np.asarray(
+                [
+                    joint.joint_1,
+                    joint.joint_2,
+                    joint.joint_3,
+                    joint.joint_4,
+                    joint.joint_5,
+                    joint.joint_6,
+                    gripper,
+                ],
+                dtype=float,
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _master_sdk_to_action(values, source):
+        values = np.asarray(values, dtype=float).reshape(-1)
+        if values.shape != (7,) or not np.all(np.isfinite(values)):
+            return None
+        return values[:6] / 57295.7795, float(values[6] / (70 * 1000)), source
+
+    def notify_master_teach_mode_started(self):
+        self._teach_ctrl_ready = False
+        self._teach_mode_started_at = time.monotonic()
+        self._last_good_master_sdk = None
+        feedback = self._read_master_feedback_sdk()
+        if feedback is not None:
+            self._last_good_master_sdk = feedback.copy()
+
+    def get_master_input_action(self):
+        """Select master feedback/ctrl exactly as robocoin's Piper leader does."""
+        feedback = self._read_master_feedback_sdk()
+        ctrl = self._read_master_ctrl_sdk()
+
+        if feedback is not None and np.any(np.abs(feedback[:6]) > 1e-6):
+            self._last_good_master_sdk = feedback.copy()
+
+        selected = None
+        source = "feedback"
+        if feedback is not None and ctrl is not None:
+            ctrl_nonzero = np.any(np.abs(ctrl[:6]) > 1e-6)
+            if ctrl_nonzero:
+                if not self._teach_ctrl_ready:
+                    elapsed = time.monotonic() - self._teach_mode_started_at
+                    if self._last_good_master_sdk is not None:
+                        max_diff = float(
+                            np.max(np.abs(ctrl[:6] - self._last_good_master_sdk[:6]))
+                        )
+                        if max_diff < 6000 or elapsed > 1.5:
+                            self._teach_ctrl_ready = True
+                    elif elapsed > 1.0:
+                        self._teach_ctrl_ready = True
+                    if not self._teach_ctrl_ready:
+                        selected = (
+                            self._last_good_master_sdk
+                            if self._last_good_master_sdk is not None
+                            else feedback
+                        )
+                if self._teach_ctrl_ready:
+                    selected = ctrl
+                    source = "ctrl"
+            else:
+                selected = feedback
+        elif ctrl is not None:
+            ctrl_nonzero = np.any(np.abs(ctrl[:6]) > 1e-6)
+            if not ctrl_nonzero and self._last_good_master_sdk is not None:
+                selected = self._last_good_master_sdk
+            else:
+                selected = ctrl
+                source = "ctrl"
+        elif feedback is not None:
+            selected = feedback
+        elif self._last_good_master_sdk is not None:
+            selected = self._last_good_master_sdk
+
+        if selected is None:
+            return None
+        return self._master_sdk_to_action(selected, source)
+
+    def master_input_invalid_all_zero(self, *, rad_thresh=0.001, first_n=6):
+        first_n = int(first_n)
+        if not 1 <= first_n <= 6:
+            raise ValueError("first_n must be in [1, 6]")
+        sdk_thresh = float(rad_thresh) * 57295.7795
+        ctrl = self._read_master_ctrl_sdk()
+        if ctrl is None:
+            return True, "GetArmJointCtrl failed"
+        if not np.all(np.abs(ctrl[:first_n]) < sdk_thresh):
+            return False, ""
+
+        feedback = self._read_master_feedback_sdk()
+        if feedback is None:
+            return True, "JointCtrl near-zero and GetArmJointMsgs failed"
+        if np.all(np.abs(feedback[:first_n]) < sdk_thresh):
+            return True, f"JointCtrl and JointMsgs near-zero on first {first_n} joints"
+        return False, "JointCtrl near-zero but JointMsgs are valid"
+
+    def wait_master_input_stable(
+        self,
+        *,
+        timeout_s=2.0,
+        poll_s=0.05,
+        warmup_sleep_s=0.6,
+        stable_reads=3,
+        max_joint_delta=0.06,
+        max_gripper_delta=0.015 / 0.07,
+    ):
+        if warmup_sleep_s > 0:
+            time.sleep(float(warmup_sleep_s))
+        deadline = time.monotonic() + float(timeout_s)
+        previous = None
+        stable_count = 0
+        while time.monotonic() < deadline:
+            action = self.get_master_input_action()
+            if action is None:
+                stable_count = 0
+                time.sleep(float(poll_s))
+                continue
+            joint, gripper, _source = action
+            current = np.concatenate([np.asarray(joint, dtype=float), [float(gripper)]])
+            if current.shape != (7,) or not np.all(np.isfinite(current)):
+                stable_count = 0
+                previous = None
+                time.sleep(float(poll_s))
+                continue
+            if previous is not None:
+                delta = np.abs(current - previous)
+                if (
+                    float(np.max(delta[:6])) <= float(max_joint_delta)
+                    and float(delta[6]) <= float(max_gripper_delta)
+                ):
+                    stable_count += 1
+                    if stable_count >= max(1, int(stable_reads)):
+                        return action
+                else:
+                    stable_count = 0
+            previous = current
+            time.sleep(float(poll_s))
+        return None
 
     def get_follower_state(self):
         return self.controllers["arm"]["left_arm"].get_state()
@@ -340,6 +516,7 @@ class PiperDAgger(Robot):
             LINKAGE_OFFSET,
         )
         time.sleep(0.5)
+        self.notify_master_teach_mode_started()
 
         print("[mode] master arm is draggable; expert controls follower")
 
@@ -368,4 +545,5 @@ class PiperDAgger(Robot):
         )
         master.EnableArm(7)
         self.reassert_follower_hold()
+        self.reset_master_input_tracking()
         print("[mode] master arm returned to 0xFC position control")
