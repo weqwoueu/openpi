@@ -92,7 +92,6 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from openpi.shared import console
-from openpi.shared import progress
 import openpi.transforms as _transforms
 
 
@@ -300,8 +299,15 @@ class GemmaValueTokenizer:
         state["_tokenizer"] = None
         return state
 
-    def tokenize(self, prompt: str, state: Any | None = None) -> tuple[np.ndarray, np.ndarray]:
-        del state
+    def tokenize(
+        self,
+        prompt: str,
+        state: Any | None = None,
+        adv_ind: str | None = None,
+        *,
+        adv_ind_dropout: bool = False,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        del state, adv_ind, adv_ind_dropout
 
         tokenizer = self._get_tokenizer()
         text = f"{str(prompt).rstrip()}\nValue:"
@@ -388,6 +394,44 @@ def _column_candidates(name: str | None) -> list[str]:
     return [name, f"observation/{name}", f"observation.{name}"]
 
 
+def _base_image_candidates(name: str) -> list[str]:
+    return list(
+        dict.fromkeys(
+            [
+                *_column_candidates(name),
+                "observation/images/cam_head",
+                "observation.images.cam_head",
+                "images/cam_head",
+                "images.cam_head",
+                "observation/images/cam_high",
+                "observation.images.cam_high",
+                "images/cam_high",
+                "images.cam_high",
+                "observation/images/base_0_rgb",
+                "observation.images.base_0_rgb",
+            ]
+        )
+    )
+
+
+def _wrist_image_candidates(name: str | None) -> list[str]:
+    return list(
+        dict.fromkeys(
+            [
+                *_column_candidates(name),
+                "observation/images/cam_wrist",
+                "observation.images.cam_wrist",
+                "images/cam_wrist",
+                "images.cam_wrist",
+                "observation/images/cam_left_wrist",
+                "observation.images.cam_left_wrist",
+                "observation/images/cam_right_wrist",
+                "observation.images.cam_right_wrist",
+            ]
+        )
+    )
+
+
 def _get_by_path(data: dict[str, Any], path: str) -> tuple[Any, bool]:
     if path in data:
         return data[path], True
@@ -456,19 +500,21 @@ class LabelAdvantageInputs(_transforms.DataTransformFn):
 
     def __call__(self, data: dict[str, Any]) -> dict[str, Any]:
         prompt = self._extract_prompt(data)
-        base_raw = _get_first(data, _column_candidates(self.base_image_col), required=False, name="base_image")
+        base_candidates = _base_image_candidates(self.base_image_col)
+        wrist_candidates = _wrist_image_candidates(self.wrist_image_col)
+        base_raw = _get_first(data, base_candidates, required=False, name="base_image")
         wrist_image = None
         wrist_raw = None
         if self.wrist_image_col:
-            wrist_raw = _get_first(data, _column_candidates(self.wrist_image_col), required=False, name="wrist_image")
+            wrist_raw = _get_first(data, wrist_candidates, required=False, name="wrist_image")
             if wrist_raw is not None and not (isinstance(wrist_raw, float) and np.isnan(wrist_raw)):
                 wrist_image = _parse_image(wrist_raw)
 
         has_base = base_raw is not None and not (isinstance(base_raw, float) and np.isnan(base_raw))
         if not has_base and wrist_image is None:
             raise KeyError(
-                f"Missing base_image. Tried keys: {_column_candidates(self.base_image_col)}. "
-                f"Fallback wrist_image keys: {_column_candidates(self.wrist_image_col) if self.wrist_image_col else []}. "
+                f"Missing base_image. Tried keys: {base_candidates}. "
+                f"Fallback wrist_image keys: {wrist_candidates}. "
                 f"Available top-level keys: {list(data.keys())}"
             )
 
@@ -795,9 +841,7 @@ def _compute_values_with_dataloader(
         desc="VLM value 推理",
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
     )
-    progress.sync_pbar_color(pbar)
     for batch in pbar:
-        progress.sync_pbar_color(pbar)
         episode_indices = _pop_batch_key(batch, "episode_index")
         frame_indices = _pop_batch_key(batch, "frame_index")
         if frame_indices is None:
@@ -916,9 +960,7 @@ def _build_pending_label_requests(
         desc="扫描 rollout 帧",
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
     )
-    progress.sync_pbar_color(pbar)
     for fallback_episode_id, parquet_path in enumerate(pbar):
-        progress.sync_pbar_color(pbar)
         columns = list(
             dict.fromkeys(
                 [
@@ -936,6 +978,10 @@ def _build_pending_label_requests(
 
         reward_col_name = _select_reward_column(df, reward_col)
         reward_labels = _series_to_scalar_float_array(df[reward_col_name], name=reward_col_name)
+        if not human_col or human_col not in df.columns:
+            raise ValueError(
+                f"Advantage 打标要求干预列 '{human_col}'，但 {parquet_path} 中不存在该列。"
+            )
         human_mask = _extract_human_mask(df, human_col)
 
         if np.all(human_mask):
@@ -1013,6 +1059,10 @@ def main() -> None:
     args = parser.parse_args()
     if not 0.0 < args.top_percent <= 100.0:
         parser.error("--top_percent must be in (0, 100]")
+    if args.lookahead <= 0:
+        parser.error("--lookahead must be greater than 0")
+    if args.batch_size <= 0:
+        parser.error("--batch_size must be greater than 0")
 
     logging.basicConfig(level=logging.INFO, force=True)
     cache_dir = os.environ.get("JAX_COMPILATION_CACHE_DIR")
@@ -1120,9 +1170,7 @@ def main() -> None:
         desc="计算待更新优势",
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
     )
-    progress.sync_pbar_color(pbar)
     for request in pbar:
-        progress.sync_pbar_color(pbar)
         advantages = np.zeros((len(request.pending_positions),), dtype=np.float32)
 
         for i, row_pos in enumerate(request.pending_positions):
@@ -1189,11 +1237,9 @@ def main() -> None:
         desc="写回 Advantage 标签",
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
     )
-    progress.sync_pbar_color(pbar)
     updated_positive = 0
     updated_negative = 0
     for request in pbar:
-        progress.sync_pbar_color(pbar)
         df = pd.read_parquet(request.parquet_path)
         if args.adv_col in df.columns:
             adv_labels = [_to_scalar_str(v, name=args.adv_col) for v in df[args.adv_col].tolist()]

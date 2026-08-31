@@ -2,10 +2,11 @@
 
 set -euo pipefail
 
-# ==================== Edit these settings ====================
-REPO_ROOT="/home/standard/workspace/pistar/openpi"
+# ==================== 在这里修改采集配置 ====================
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
 
-# Raw rollout/DAgger dataset. Keep it separate from the expert dataset.
+# DAgger 原始数据集，请勿与专家示教数据集混在一起。
 REPO_ID="piperx/piperx_plug_dagger_demo" #这里改数据集名称
 OUTPUT_DIR="/home/standard/agilex/lerobot"
 TASK_PROMPT="put the black plug into the two-hole socket"
@@ -19,24 +20,24 @@ SAMPLE_FPS=30
 TELEOP_FPS=60
 CHUNK_SIZE=50
 ASYNC_PREFETCH_ENABLED=false
-# When enabled, request the next chunk with this many current actions left.
+# 开启异步预取后，当前 chunk 剩余这么多步时请求下一个 chunk。
 PREFETCH_THRESHOLD=25
-# Positive integer: save this many episodes. -1: keep collecting.
+# 正整数：采集指定条数后退出；-1：持续采集。
 NUM_EPISODES=-1
-# Positive integer: automatically stop for labeling at this frame. -1: unlimited RAM growth.
+# 正整数：达到指定帧数后自动进入标注；-1：不限制（内存会持续增长）。
 MAX_STEPS=-1
 
-# Episode mix targets. -1 keeps counting the category without setting a target.
+# 各类数据的目标条数；-1 表示只统计，不设置目标。
 TARGET_AUTONOMOUS_SUCCESS=40
 TARGET_AUTONOMOUS_FAILURE=40
 TARGET_INTERVENTION_SUCCESS=50
 TARGET_INTERVENTION_FAILURE=-1
 
 RESET_SETTLE_SECONDS=2.0
-# Before 0xFA, ramp the master from init to the follower feedback pose.
+# 切换到 0xFA 控制模式前，将主臂从初始位缓慢对齐到从臂反馈位姿。
 TAKEOVER_ALIGN_SPEED=30
 
-# Robocoin master-input readiness and feedback/ctrl handoff.
+# Robocoin 主臂输入就绪检测，以及反馈/控制模式切换配置。
 MASTER_ALL_ZERO_ENABLED=true
 MASTER_ALL_ZERO_RAD_THRESH=0.001
 MASTER_ALL_ZERO_CHECK_JOINTS=6
@@ -45,14 +46,14 @@ MASTER_STABLE_POLL=0.05
 MASTER_STABLE_WARMUP=0.6
 MASTER_STABLE_READS=3
 MASTER_STABLE_MAX_JOINT_DELTA=0.06
-# PiStar gripper is normalized to 0..1; this equals robocoin's 0.015 m.
+# PiStar 夹爪范围归一化为 0..1；此值对应 robocoin 的 0.015 m。
 MASTER_STABLE_MAX_GRIPPER_DELTA=0.21428571428571427
 
-# Ordinary pi0.5 SFT: leave empty. PiStar inference: for example positive.
-# This affects inference only. Saved raw data always uses adv_ind=none.
+# 普通 pi0.5 SFT 留空；PiStar 推理可填写 positive 等条件。
+# 仅影响推理，保存的原始数据始终使用 adv_ind=none。
 ADV_IND=""
 
-# Expert takeover filtering, matching the accepted PiperX recorder.
+# 人工接管动作滤波，与已验证的 PiperX 采集器保持一致。
 EMA_ENABLED=true
 EMA_ALPHA=0.80
 SLEW_ENABLED=true
@@ -71,15 +72,15 @@ PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 COLLECT_SCRIPT="${REPO_ROOT}/control_your_robot/example/collect/collect_lerobot_dagger_websocket.py"
 
 if [[ ! -f "$ENV_SCRIPT" ]]; then
-    echo "ERROR: my_env.sh not found: $ENV_SCRIPT" >&2
+    echo "错误：未找到环境配置脚本：$ENV_SCRIPT" >&2
     exit 1
 fi
 if [[ ! -x "$PYTHON_BIN" ]]; then
-    echo "ERROR: Python environment not found: $PYTHON_BIN" >&2
+    echo "错误：未找到可执行的 Python 环境：$PYTHON_BIN" >&2
     exit 1
 fi
 if [[ ! -f "$COLLECT_SCRIPT" ]]; then
-    echo "ERROR: DAgger collector not found: $COLLECT_SCRIPT" >&2
+    echo "错误：未找到 DAgger 采集程序：$COLLECT_SCRIPT" >&2
     exit 1
 fi
 
@@ -131,5 +132,15 @@ args=(
 if [[ -n "$ADV_IND" ]]; then
     args+=(--adv-ind "$ADV_IND")
 fi
+
+printf '%s\n' \
+    "" \
+    "================ DAgger 数据采集按键 ================" \
+    "Enter：开始运行 / 结束当前数据 / 确认保存（根据当前阶段生效）" \
+    "空格键：策略运行时切换为人工接管，每条数据只能接管一次" \
+    "右方向键：标记成功" \
+    "左方向键：标记失败" \
+    "Ctrl+C：安全结束采集" \
+    "======================================================"
 
 exec "$PYTHON_BIN" "$COLLECT_SCRIPT" "${args[@]}"

@@ -616,8 +616,8 @@ def test_dagger_target_progress_is_advisory(tmp_path):
     tracker.record(DAGGER.classify_dagger_episode([0, 1], True, 1))
 
     progress = tracker.format_progress()
-    assert "policy success       1/1" in progress
-    assert "takeover success     1/1" in progress
+    assert "策略自主成功：1/1" in progress
+    assert "人工接管成功：1/1" in progress
     assert tracker.configured_targets_met()
 
     tracker.record(DAGGER.classify_dagger_episode([0], False, 2))

@@ -419,6 +419,22 @@ def eval_step(
     return model.compute_loss(rng, observation, target, train=False)
 
 
+def _host_step(step: int | jax.Array) -> int:
+    """Convert a replicated JAX step scalar before using it in Python control flow."""
+    return int(jax.device_get(step))
+
+
+def _checkpoint_payload(state: TrainState) -> dict:
+    payload = {
+        "params": state.params.to_pure_dict(),
+        "opt_state": state.opt_state,
+        "step": jnp.asarray(state.step, dtype=jnp.int32),
+    }
+    if state.ema_params is not None:
+        payload["ema_params"] = state.ema_params.to_pure_dict()
+    return payload
+
+
 def load_checkpoint(checkpoint_path: Path, state: TrainState) -> TrainState:
     """从 checkpoint 恢复训练状态。"""
     import orbax.checkpoint as ocp
@@ -429,23 +445,35 @@ def load_checkpoint(checkpoint_path: Path, state: TrainState) -> TrainState:
     if not checkpoint_path.exists():
         raise ValueError(f"Checkpoint 不存在: {checkpoint_path}")
     
-    with ocp.PyTreeCheckpointer() as ckptr:
-        restored = ckptr.restore(str(checkpoint_path))
+    target = _checkpoint_payload(state)
+    with ocp.Checkpointer(ocp.StandardCheckpointHandler()) as ckptr:
+        metadata = ckptr.metadata(checkpoint_path)
+        required_keys = set(target)
+        missing_keys = required_keys - set(metadata)
+        if missing_keys:
+            missing = ", ".join(sorted(missing_keys))
+            raise ValueError(
+                f"Checkpoint 缺少严格续训所需字段: {missing}. "
+                "旧 checkpoint 只能作为权重初始化，不能通过 --resume_from_checkpoint 续训。"
+            )
+        restored = ckptr.restore(
+            checkpoint_path,
+            args=ocp.args.StandardRestore(target, strict=True),
+        )
     
     # 恢复参数
     state.params.replace_by_pure_dict(restored["params"])
     
-    # 恢复 EMA 参数（如果存在）
-    if "ema_params" in restored and state.ema_params is not None:
+    # 恢复 EMA 参数和优化器状态
+    if state.ema_params is not None:
         state.ema_params.replace_by_pure_dict(restored["ema_params"])
-    
-    # 恢复步数
-    restored_step = int(restored["step"])
+
+    restored_step = _host_step(restored["step"])
     state = TrainState(
         step=restored_step,
         params=state.params,
         model_def=state.model_def,
-        opt_state=state.opt_state,
+        opt_state=restored["opt_state"],
         ema_params=state.ema_params,
     )
     
@@ -453,28 +481,22 @@ def load_checkpoint(checkpoint_path: Path, state: TrainState) -> TrainState:
     return state
 
 
-def save_checkpoint(state: TrainState, checkpoint_dir: Path, step: int):
+def save_checkpoint(state: TrainState, checkpoint_dir: Path):
     """保存 checkpoint。"""
     import orbax.checkpoint as ocp
 
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    # 确保使用绝对路径
+    step = _host_step(state.step)
     ckpt_path = (checkpoint_dir / f"step_{step:08d}").resolve()
     if ckpt_path.exists():
+        if not ocp.utils.is_checkpoint_finalized(ckpt_path):
+            raise RuntimeError(f"Checkpoint 目录存在但未完整写入: {ckpt_path}")
         logging.warning(console.warn(f"Checkpoint already exists, skip save: {ckpt_path}"))
         return
 
-    with ocp.PyTreeCheckpointer() as ckptr:
-        save_dict = {
-            "params": state.params.to_pure_dict(), 
-            "step": step
-        }
-        # π0优化：同时保存EMA参数
-        if state.ema_params is not None:
-            save_dict["ema_params"] = state.ema_params.to_pure_dict()
-        
-        ckptr.save(str(ckpt_path), save_dict)
+    with ocp.Checkpointer(ocp.StandardCheckpointHandler()) as ckptr:
+        ckptr.save(ckpt_path, args=ocp.args.StandardSave(_checkpoint_payload(state)))
 
     logging.info(console.ok(f"保存 checkpoint: {ckpt_path}"))
 
@@ -498,7 +520,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
     parser.add_argument("--gemma_variant", type=str, default="gemma3_270m", help="Gemma 变体")
     parser.add_argument("--siglip_variant", type=str, default="So400m/14", help="SigLIP 变体")
-    parser.add_argument("--fsdp_devices", type=int, default=1, help="FSDP设备数量，>1启用模型并行")
+    parser.add_argument("--fsdp_devices", type=int, default=1, help="当前固定为 1；多卡时使用数据并行")
     parser.add_argument("--load_pretrained", action="store_true", help="加载 SigLIP + Gemma3-270M 预训练权重")
     parser.add_argument("--siglip_path", type=str, default=None, help="SigLIP2 .npz 预训练权重路径")
     parser.add_argument("--gemma_checkpoint_dir", type=str, default=None, help="Gemma3-270M checkpoint 目录")
@@ -544,16 +566,23 @@ def main():
     rng = jax.random.key(args.seed)
     train_rng, init_rng = jax.random.split(rng)
 
-    # π0风格多GPU配置 - 自动使用所有可用GPU
+    # π0风格多GPU配置。fsdp_devices=1 表示参数复制、batch 跨可见设备切分。
     available_devices = jax.device_count()
-    # 如果用户没有指定fsdp_devices，自动使用所有GPU
-    if args.fsdp_devices == 1 and available_devices > 1:
-        args.fsdp_devices = available_devices
-        logging.info(console.info(f"自动调整：使用所有 {available_devices} 个GPU进行FSDP"))
-    
     logging.info(console.info(f"可用设备数: {available_devices}, FSDP设备数: {args.fsdp_devices}"))
+    if args.fsdp_devices != 1:
+        raise ValueError(
+            "Value 训练脚本当前只支持 --fsdp_devices 1；该模式在多卡机器上使用数据并行。"
+        )
     if available_devices % args.fsdp_devices != 0:
         raise ValueError(f"设备数 {available_devices} 必须能被FSDP设备数 {args.fsdp_devices} 整除")
+    if args.batch_size <= 0 or args.batch_size % available_devices != 0:
+        raise ValueError(f"batch_size={args.batch_size} 必须为正数且能被可用设备数 {available_devices} 整除")
+    if args.num_train_steps <= 0:
+        raise ValueError("num_train_steps 必须大于 0")
+    if args.log_interval <= 0 or args.save_interval <= 0:
+        raise ValueError("log_interval 和 save_interval 必须大于 0")
+    if args.warmup_steps is not None and not 0 <= args.warmup_steps <= args.num_train_steps:
+        raise ValueError("warmup_steps 必须在 [0, num_train_steps] 范围内")
     
     mesh = sharding.make_mesh(num_fsdp_devices=args.fsdp_devices)
     logging.info(console.info(f"Mesh形状: {mesh.shape}, 轴: {mesh.axis_names}"))
@@ -711,29 +740,18 @@ def main():
     )
     logging.info("\033[1;32m模型初始化完成\033[0m")
     
-    # 从检查点恢复（如果指定）
+    # 单卡或多卡数据并行：模型状态复制到所有可见设备。
+    train_state = jax.tree.map(
+        lambda x: jax.device_put(x, replicated_sharding),
+        train_state,
+        is_leaf=lambda x: hasattr(x, "shape"),
+    )
+
+    # 从检查点恢复（如果指定）。target 已带有本次运行的设备布局。
     if args.resume_from_checkpoint:
         checkpoint_path = Path(args.checkpoint_dir) / args.resume_from_checkpoint
         train_state = load_checkpoint(checkpoint_path, train_state)
-        logging.info(console.info(f"从 step {train_state.step} 继续训练"))
-
-    # 将模型参数分片到多GPU
-    if args.fsdp_devices > 1:
-        logging.info("\033[1;36m应用FSDP分片到模型参数...\033[0m")
-        with sharding.set_mesh(mesh):
-            train_state = jax.tree.map(
-                lambda x: sharding.apply_fsdp_sharding(mesh, x) if hasattr(x, 'shape') else x,
-                train_state,
-                is_leaf=lambda x: hasattr(x, 'shape')
-            )
-        logging.info("\033[1;32mFSDP分片完成\033[0m")
-    else:
-        # 单卡：复制到所有设备
-        train_state = jax.tree.map(
-            lambda x: jax.device_put(x, replicated_sharding), 
-            train_state,
-            is_leaf=lambda x: hasattr(x, 'shape')
-        )
+        logging.info(console.info(f"从 step {_host_step(train_state.step)} 继续训练"))
 
     @functools.partial(
         jax.jit,
@@ -786,8 +804,15 @@ def main():
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     # 从恢复的步数开始训练
-    start_step = train_state.step
+    start_step = _host_step(train_state.step)
     total_steps = args.num_train_steps
+    if start_step > total_steps:
+        raise ValueError(f"Checkpoint step={start_step} 已超过 num_train_steps={total_steps}")
+    if start_step == total_steps:
+        logging.info(console.ok(f"Checkpoint 已完成 {total_steps} 步，无需继续训练"))
+        if wandb_run is not None:
+            wandb_run.finish()
+        return
     pbar = tqdm.tqdm(
         range(start_step, total_steps),
         initial=start_step,
@@ -804,7 +829,7 @@ def main():
     # 预取多个batch，减少GPU等待
     logging.info("\033[1;36m预取前几个batch以优化GPU利用率...\033[0m")
     prefetch_batches = []
-    for i in range(min(3, len(data_loader))):  # 预取3个batch
+    for _ in range(min(3, len(data_loader))):  # 预取3个batch
         try:
             batch = next(data_iter)
             prefetch_batches.append(batch)
@@ -821,7 +846,7 @@ def main():
     logging.info("\033[1;36mJIT编译预热...\033[0m")
     observation, value = prefetch_batches[0]
     with sharding.set_mesh(mesh):
-        _ = jit_train_step(
+        warmup_result = jit_train_step(
             train_state.params,
             train_state.model_def,
             train_state.opt_state,
@@ -831,10 +856,10 @@ def main():
             observation,
             value,
         )
+        jax.block_until_ready(warmup_result)
+        del warmup_result
     logging.info("\033[1;32mJIT编译完成，开始训练...\033[0m")
-    
-    # 重新初始化数据迭代器
-    data_iter = iter(data_loader)
+
     prefetch_idx = 0
 
     def run_validation(step: int) -> None:
@@ -869,7 +894,7 @@ def main():
                 }
             )
 
-    for step in pbar:
+    for _step in pbar:
         # 使用预取的batch或获取新batch
         if prefetch_idx < len(prefetch_batches):
             observation, value = prefetch_batches[prefetch_idx]
@@ -900,18 +925,23 @@ def main():
             )
 
         infos.append(info)
+        completed_step = _host_step(train_state.step)
 
-        if step % args.log_interval == 0 and step > 0:
+        if completed_step % args.log_interval == 0 or completed_step == total_steps:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
             
             # 获取当前学习率
-            current_lr = float(lr_schedule(step)) if lr_schedule is not None else None
+            current_lr = float(lr_schedule(completed_step)) if lr_schedule is not None else None
             
             info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
-            pbar.write(f"Step {step}: {info_str}, lr={current_lr:.2e}" if isinstance(current_lr, (int, float)) else f"Step {step}: {info_str}")
+            pbar.write(
+                f"Step {completed_step}: {info_str}, lr={current_lr:.2e}"
+                if isinstance(current_lr, (int, float))
+                else f"Step {completed_step}: {info_str}"
+            )
             if wandb_run is not None:
-                log_payload = {"step": int(step), "train/freeze_mode": args.freeze_mode}
+                log_payload = {"step": completed_step, "train/freeze_mode": args.freeze_mode}
                 for key, value in reduced_info.items():
                     log_payload[f"train/{key}"] = float(value)
                 if current_lr is not None:
@@ -919,16 +949,15 @@ def main():
                 wandb_run.log(log_payload)
             infos = []
 
-        if val_loader is not None and args.val_interval > 0 and step % args.val_interval == 0 and step > 0:
-            run_validation(step)
+        if val_loader is not None and args.val_interval > 0 and completed_step % args.val_interval == 0:
+            run_validation(completed_step)
 
-        if step % args.save_interval == 0 and step > 0:
+        if completed_step % args.save_interval == 0 or completed_step == total_steps:
             # 计算当前损失
             current_loss = jax.device_get(info["loss"]).item()
-            logging.info(f"\033[1;44m保存检查点 - Step {step}, Loss: {current_loss:.4f}\033[0m")
-            save_checkpoint(train_state, checkpoint_dir, step)
+            logging.info(f"\033[1;44m保存检查点 - Step {completed_step}, Loss: {current_loss:.4f}\033[0m")
+            save_checkpoint(train_state, checkpoint_dir)
 
-    save_checkpoint(train_state, checkpoint_dir, args.num_train_steps)
     if wandb_run is not None:
         wandb_run.finish()
     logging.info("\033[1;32m训练完成!\033[0m")

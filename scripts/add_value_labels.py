@@ -18,7 +18,6 @@ import pandas as pd
 from tqdm import tqdm
 
 from openpi.shared import console
-from openpi.shared import progress
 
 
 VALUE_LABEL_COLUMN = "value_label"
@@ -125,9 +124,7 @@ def main():
         desc="处理 episodes",
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
     )
-    progress.sync_pbar_color(pbar)
     for parquet_path in pbar:
-        progress.sync_pbar_color(pbar)
         frames = add_value_to_parquet(parquet_path)
         total_frames += frames
 

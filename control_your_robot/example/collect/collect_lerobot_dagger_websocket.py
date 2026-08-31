@@ -39,10 +39,10 @@ PRIMARY_EPISODE_CATEGORIES = (
     "intervention_failure",
 )
 CATEGORY_LABELS = {
-    "autonomous_success": "policy success",
-    "autonomous_failure": "policy failure",
-    "intervention_success": "takeover success",
-    "intervention_failure": "takeover failure",
+    "autonomous_success": "策略自主成功",
+    "autonomous_failure": "策略自主失败",
+    "intervention_success": "人工接管成功",
+    "intervention_failure": "人工接管失败",
 }
 
 
@@ -375,7 +375,7 @@ class DaggerEpisodeTracker:
 
     def format_progress(self):
         counts = self.counts
-        lines = ["DAgger episode totals:"]
+        lines = ["DAgger 数据统计："]
         for episode_type in PRIMARY_EPISODE_CATEGORIES:
             target = self.targets[episode_type]
             progress = (
@@ -383,7 +383,7 @@ class DaggerEpisodeTracker:
                 if target >= 0
                 else str(counts[episode_type])
             )
-            lines.append(f"  {CATEGORY_LABELS[episode_type]:20s} {progress}")
+            lines.append(f"  {CATEGORY_LABELS[episode_type]}：{progress}")
         return "\n".join(lines)
 
     def _load_summary(self):
@@ -398,8 +398,8 @@ class DaggerEpisodeTracker:
                     record = DaggerEpisodeSummary.from_dict(json.loads(line))
                 except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                     print(
-                        f"Warning: ignoring invalid DAgger summary line "
-                        f"{self.summary_path}:{line_number}; parquet data will be used."
+                        f"警告：忽略无效的 DAgger 汇总记录 "
+                        f"{self.summary_path}:{line_number}，将以 parquet 数据为准。"
                     )
                     continue
                 records[record.episode_index] = record
@@ -953,8 +953,8 @@ class DaggerRuntime:
             self.teleop_mapping.align(raw_action, follower_state)
             action_filter.seed(follower_state["joint"], follower_state["gripper"])
             print(
-                "[mode] master input source changed: "
-                f"{previous_source} -> {raw_action[2]}; teleop baseline rebased"
+                "[模式] 主臂输入源已切换："
+                f"{previous_source} -> {raw_action[2]}；已重新对齐遥操作基准。"
             )
         return action_filter.process(self.teleop_mapping.transform(raw_action))
 
@@ -1036,7 +1036,7 @@ def _cleanup_robot(robot):
                 try:
                     cleanup()
                 except Exception as error:
-                    print(f"Warning: camera cleanup failed: {error}")
+                    print(f"警告：相机资源清理失败：{error}")
     for group in getattr(robot, "controllers", {}).values():
         for controller in group.values():
             sdk = getattr(controller, "controller", None)
@@ -1045,7 +1045,7 @@ def _cleanup_robot(robot):
                 try:
                     disconnect()
                 except Exception as error:
-                    print(f"Warning: CAN cleanup failed: {error}")
+                    print(f"警告：CAN 资源清理失败：{error}")
 
 
 def _parse_bool(value: str) -> bool:
@@ -1058,7 +1058,7 @@ def _parse_bool(value: str) -> bool:
 
 
 def _build_parser():
-    parser = argparse.ArgumentParser(description="PiperX WebSocket rollout + one-way DAgger collector")
+    parser = argparse.ArgumentParser(description="PiperX WebSocket 策略运行与单向接管 DAgger 采集器")
     parser.add_argument("--server-host", default="127.0.0.1")
     parser.add_argument("--server-port", type=int, default=8000)
     parser.add_argument("--repo-id", required=True)
@@ -1074,10 +1074,10 @@ def _build_parser():
         "--prefetch-threshold",
         type=int,
         default=0,
-        help="request the next chunk with this many current actions remaining; 0 disables overlap",
+        help="当前 chunk 剩余指定步数时请求下一个 chunk；0 表示禁用重叠预取",
     )
     parser.add_argument("--num-episode", type=int, default=-1)
-    parser.add_argument("--max-step", type=int, default=900, help="-1 disables automatic episode stop")
+    parser.add_argument("--max-step", type=int, default=900, help="-1 表示不自动结束当前数据")
     parser.add_argument("--target-autonomous-success", type=int, default=-1)
     parser.add_argument("--target-autonomous-failure", type=int, default=-1)
     parser.add_argument("--target-intervention-success", type=int, default=-1)
@@ -1095,7 +1095,7 @@ def _build_parser():
     parser.add_argument(
         "--master-stable-max-gripper-delta", type=float, default=0.015 / 0.07
     )
-    parser.add_argument("--adv-ind", default=None, help="optional inference condition; raw dataset still stores none")
+    parser.add_argument("--adv-ind", default=None, help="可选推理条件；原始数据仍保存为 none")
     parser.add_argument("--ema-enabled", type=_parse_bool, default=True)
     parser.add_argument("--ema-alpha", type=float, default=0.8)
     parser.add_argument("--slew-enabled", type=_parse_bool, default=True)
@@ -1153,7 +1153,7 @@ def main():
 
     def request_stop(_signum, _frame):
         if not stop_requested.is_set():
-            print("\nCtrl+C received; finishing any active dataset save, then exiting.")
+            print("\n收到 Ctrl+C：完成当前正在保存的数据后退出。")
         stop_requested.set()
 
     robot = None
@@ -1167,7 +1167,7 @@ def main():
     episode_unsaved = False
 
     try:
-        print(f"Connecting to ws://{args.server_host}:{args.server_port} ...")
+        print(f"正在连接推理服务 ws://{args.server_host}:{args.server_port} ...")
         policy_client = websocket_client_policy.WebsocketClientPolicy(
             host=args.server_host, port=args.server_port
         )
@@ -1178,7 +1178,7 @@ def main():
         inference_adv_ind = args.adv_ind
         if metadata.get("requires_adv_ind") is False:
             inference_adv_ind = None
-        print(f"Server metadata: {metadata}")
+        print(f"推理服务信息：{metadata}")
 
         robot = PiperDAgger(
             master_can=args.master_can,
@@ -1252,7 +1252,7 @@ def main():
         listener.start()
         signal.signal(signal.SIGINT, request_stop)
         signal.signal(signal.SIGTERM, request_stop)
-        print("\nREADY: Enter starts policy rollout; Ctrl+C exits.")
+        print("\n准备就绪：按 Enter 开始策略运行；按 Ctrl+C 退出。")
 
         while session.state is not SessionState.COMPLETE:
             if stop_requested.is_set():
@@ -1263,40 +1263,40 @@ def main():
 
             if command is SessionCommand.START_EPISODE:
                 listener.pause()
-                print("\nResetting both arms and starting policy rollout...")
+                print("\n正在复位双臂并启动策略运行，请等待...")
                 runtime.start_episode(session.generation)
                 episode_unsaved = True
-                print("AUTONOMOUS: Space hands control to expert once; Enter ends episode.")
+                print("策略自主控制中：按一次空格键切换为人工接管；按 Enter 结束本条数据。")
                 listener.resume()
             elif command is SessionCommand.START_TAKEOVER:
                 listener.pause()
-                print("\nSwitching to expert: invalidating policy chunk and aligning master...")
+                print("\n正在切换到人工接管：清空策略动作并对齐主臂，请勿操作...")
                 try:
                     runtime.begin_takeover(session.generation)
                 except TakeoverTransitionError as error:
                     session.takeover_failed()
                     runtime.recover_failed_takeover(session.generation)
-                    print(f"TAKEOVER FAILED: {error}")
+                    print(f"人工接管失败：{error}")
                     print(
-                        "AUTONOMOUS RESUMED: current episode is preserved; "
-                        "Space can retry expert takeover."
+                        "已恢复策略自主控制：当前数据已保留；"
+                        "可再次按空格键尝试人工接管。"
                     )
                 else:
                     session.takeover_ready()
                     print(
-                        "TAKEOVER READY: expert controls follower; "
-                        "Space is now disabled; Enter ends episode."
+                        "人工接管已就绪：现在由主臂控制从臂；"
+                        "空格键已禁用；按 Enter 结束本条数据。"
                     )
                 finally:
                     listener.resume()
             elif command is SessionCommand.STOP_EPISODE:
                 listener.pause()
                 runtime.stop_episode(session.generation)
-                print("\nLABEL: Right arrow = success, Left arrow = failure, then Enter saves.")
+                print("\n结果标注：成功按右方向键，失败按左方向键，然后按 Enter 保存。")
                 listener.resume()
             elif command is SessionCommand.SAVE_EPISODE:
-                label_text = "success" if session.label else "failure"
-                print(f"\nSaving {label_text} episode ({runtime.step_count} frames)...")
+                label_text = "成功" if session.label else "失败"
+                print(f"\n正在保存{label_text}数据（{runtime.step_count} 帧）...")
                 listener.pause()
                 saved_summary = save_dagger_episode(
                     collector,
@@ -1306,28 +1306,31 @@ def main():
                 if saved_summary is not None:
                     episode_unsaved = False
                     session.complete_save()
+                    episode_label = CATEGORY_LABELS.get(
+                        saved_summary.episode_type, saved_summary.episode_type
+                    )
                     print(
-                        f"Saved dataset episode {saved_summary.episode_index}: "
-                        f"{saved_summary.episode_type}, {saved_summary.total_frames} frames. "
-                        "Raw adv_ind=none."
+                        f"已保存第 {saved_summary.episode_index} 条数据："
+                        f"{episode_label}，共 {saved_summary.total_frames} 帧；"
+                        "原始数据 adv_ind=none。"
                     )
                     print(episode_tracker.format_progress())
                     if episode_tracker.configured_targets_met():
-                        print("All configured category targets are met; Ctrl+C exits normally.")
+                        print("所有已配置类别均达到目标数量；按 Ctrl+C 正常退出。")
                 else:
                     collector.clear_current_episode()
                     episode_unsaved = False
                     session.cancel_empty_save()
-                    print("Empty episode was not saved or counted.")
+                    print("当前数据为空，未保存且未计数。")
                 listener.resume()
                 if session.state is SessionState.READY_NEXT:
-                    print("READY NEXT: reset the scene, then press Enter for the next rollout.")
+                    print("准备采集下一条：请先复位场景，然后按 Enter 开始。")
                 if stop_requested.is_set():
                     break
 
             if session.state is SessionState.AWAIT_LABEL and event in (KeyEvent.RIGHT, KeyEvent.LEFT):
-                selected = "success" if session.label else "failure"
-                print(f"Label selected: {selected}. Press Enter to save.")
+                selected = "成功" if session.label else "失败"
+                print(f"已选择结果：{selected}。按 Enter 保存。")
 
             if session.state is SessionState.AUTONOMOUS:
                 runtime.tick_autonomous()
@@ -1342,27 +1345,27 @@ def main():
                 session.finish_active_episode()
                 listener.pause()
                 runtime.stop_episode(session.generation)
-                print("\nMaximum step count reached.")
-                print("LABEL: Right arrow = success, Left arrow = failure, then Enter saves.")
+                print("\n已达到本条数据的最大帧数。")
+                print("结果标注：成功按右方向键，失败按左方向键，然后按 Enter 保存。")
                 listener.resume()
 
         if session.state is SessionState.COMPLETE:
-            print(f"\nCompleted {session.saved_episodes} DAgger episodes.")
+            print(f"\n已完成并保存 {session.saved_episodes} 条 DAgger 数据。")
     finally:
         if runtime is not None:
             try:
                 runtime.stop_active_control(restore_master=True)
             except Exception as error:
-                print(f"Warning: control cleanup failed: {error}")
+                print(f"警告：控制资源清理失败：{error}")
         if collector is not None and episode_unsaved:
             collector.clear_current_episode()
-            print("Unsaved current episode discarded.")
+            print("已丢弃当前未保存的数据。")
         dataset = getattr(collector, "dataset", None)
         if dataset is not None:
             try:
                 dataset.stop_image_writer()
             except Exception as error:
-                print(f"Warning: image writer cleanup failed: {error}")
+                print(f"警告：图像写入器清理失败：{error}")
         listener.stop()
         if inference_worker is not None:
             inference_worker.stop()
@@ -1374,4 +1377,4 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nCtrl+C received; DAgger collector stopped normally.")
+        print("\n收到 Ctrl+C，DAgger 采集器已正常停止。")
