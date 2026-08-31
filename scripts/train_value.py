@@ -222,6 +222,7 @@ def _wandb_sanitize_config(config: dict) -> dict:
     return sanitized
 
 
+@jax.tree_util.register_dataclass
 @dataclasses.dataclass
 class TrainState:
     step: int

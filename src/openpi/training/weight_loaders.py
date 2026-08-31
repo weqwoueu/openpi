@@ -82,6 +82,31 @@ def _summarize_param_match(name: str, loaded_params: at.Params, ref_params: at.P
         logger.warning(console.warn(f"{name} shape mismatch keys (sample): {sample}"))
 
 
+def _validate_param_coverage(name: str, loaded_params: at.Params, ref_params: at.Params) -> None:
+    """Require every reference parameter to be present with the expected shape."""
+    flat_loaded = flax.traverse_util.flatten_dict(loaded_params, sep="/")
+    flat_ref = flax.traverse_util.flatten_dict(ref_params, sep="/")
+    missing = sorted(set(flat_ref) - set(flat_loaded))
+    shape_mismatch = []
+    for key in set(flat_ref) & set(flat_loaded):
+        loaded_value = flat_loaded[key]
+        ref_value = flat_ref[key]
+        if hasattr(ref_value, "shape") and (
+            not hasattr(loaded_value, "shape")
+            or not hasattr(loaded_value, "dtype")
+            or loaded_value.shape != ref_value.shape
+        ):
+            shape_mismatch.append(key)
+    shape_mismatch.sort()
+    if missing or shape_mismatch:
+        matched = len(flat_ref) - len(missing) - len(shape_mismatch)
+        raise ValueError(
+            f"{name} checkpoint is incompatible: matched {matched}/{len(flat_ref)}, "
+            f"missing={len(missing)}, shape_mismatch={len(shape_mismatch)}; "
+            f"missing sample={missing[:10]}, shape mismatch sample={shape_mismatch[:10]}"
+        )
+
+
 def _select_subtree_by_overlap(loaded_params: at.Params, ref_params: at.Params, name: str) -> at.Params:
     """Select a nested subtree with best key overlap against ref params."""
     if not isinstance(loaded_params, Mapping):
@@ -160,14 +185,34 @@ def _maybe_resample_siglip_posemb(siglip_params: at.Params, ref_params: at.Param
 
 def _maybe_convert_gemma_ckpt_tree(tree: at.Params) -> at.Params:
     """Convert Gemma checkpoint tree to nested format if needed."""
-    if gm_ckpt is None:
-        return tree
-    try:
-        ckpt_tree = gm_ckpt._CheckpointTree(tree=tree)
-        return ckpt_tree.nested_tree
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.warning(console.warn(f"Gemma checkpoint convert failed: {exc}"))
-        return tree
+    converted = tree
+    if gm_ckpt is not None:
+        try:
+            ckpt_tree = gm_ckpt._CheckpointTree(tree=tree)
+            converted = ckpt_tree.nested_tree
+        except Exception as exc:  # pragma: no cover - version-dependent fallback
+            logger.warning(console.warn(f"Gemma checkpoint convert failed: {exc}; using prefix fallback"))
+
+    if not isinstance(converted, Mapping):
+        return converted
+
+    flat = flax.traverse_util.flatten_dict(converted, sep="/")
+    prefix = "transformer/"
+    if flat and all(key.startswith(prefix) for key in flat):
+        renamed = {}
+        for key, value in flat.items():
+            key = key[len(prefix) :]
+            if key.endswith(("/mlp/gating_einsum/w", "/mlp/linear/w")):
+                key = key.removesuffix("/w")
+            if key in renamed:
+                raise ValueError(f"Gemma checkpoint key collision after normalization: {key}")
+            renamed[key] = value
+        converted = flax.traverse_util.unflatten_dict(
+            renamed,
+            sep="/",
+        )
+        logger.info(console.info(f"Gemma checkpoint: stripped '{prefix}' from {len(flat)} parameters"))
+    return converted
 
 
 def _select_siglip_image_params(siglip_params: at.Params, ref_params: at.Params) -> at.Params:
@@ -343,6 +388,7 @@ class ValueModelWeightLoader(WeightLoader):
             siglip_params = _maybe_resample_siglip_posemb(siglip_params, params["img"])
         if isinstance(params, Mapping) and "img" in params:
             _summarize_param_match("SigLIP", siglip_params, params["img"])
+            _validate_param_coverage("SigLIP", siglip_params, params["img"])
 
         logger.info(console.info("加载 Gemma 3 270M 权重 (from local Orbax checkpoint)..."))
         gemma_checkpoint_dir = self.gemma_checkpoint_dir or os.getenv("OPENPI_VALUE_GEMMA_CKPT")
@@ -387,6 +433,7 @@ class ValueModelWeightLoader(WeightLoader):
             raise
         if isinstance(params, Mapping) and "llm" in params:
             _summarize_param_match("Gemma", gemma_params, params["llm"])
+            _validate_param_coverage("Gemma", gemma_params, params["llm"])
 
         loaded_params = {
             "img": siglip_params,
