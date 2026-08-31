@@ -6,7 +6,7 @@ set -euo pipefail
 REPO_ROOT="/home/standard/workspace/pistar/openpi"
 
 # Raw rollout/DAgger dataset. Keep it separate from the expert dataset.
-REPO_ID="piperx/piperx_plug_dagger_demo"
+REPO_ID="piperx/piperx_plug_dagger_demo" #这里改数据集名称
 OUTPUT_DIR="/home/standard/agilex/lerobot"
 TASK_PROMPT="put the black plug into the two-hole socket"
 

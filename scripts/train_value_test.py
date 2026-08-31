@@ -5,6 +5,27 @@ import optax
 from . import train_value
 
 
+def test_value_tokenizer_accepts_common_prompt_transform_arguments():
+    class FakeTokenizer:
+        def encode(self, _text, *, add_bos, add_eos):
+            assert add_bos is True
+            assert add_eos is False
+            return [1, 2]
+
+    tokenizer = train_value.GemmaValueTokenizer(max_len=4)
+    tokenizer._tokenizer = FakeTokenizer()  # noqa: SLF001
+
+    tokens, mask = tokenizer.tokenize(
+        "insert the plug",
+        state=None,
+        adv_ind="positive",
+        adv_ind_dropout=True,
+    )
+
+    assert tokens.tolist() == [1, 2, 0, 0]
+    assert mask.tolist() == [True, True, False, False]
+
+
 def test_train_state_is_registered_as_jax_pytree():
     model = nnx.Linear(2, 2, rngs=nnx.Rngs(0))
     params = nnx.state(model)
