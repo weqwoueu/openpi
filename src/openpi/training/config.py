@@ -1028,6 +1028,25 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
     ),
+    TrainConfig(
+        name="pi05_piperx_plug_recap1",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            pistar=True,
+            action_dim=32,
+            action_horizon=50,
+        ),
+        data=LeRobotPiperDataConfig(
+            repo_id="piperx_plug_dagger_mix2_v1_adv",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            adv_ind_dropout=True,
+        ),
+        batch_size=240,
+        num_workers=16,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
     # Pi05 model fine-tuning on local toy_33 dataset config
     TrainConfig(
         name="pi05_toy_33",
