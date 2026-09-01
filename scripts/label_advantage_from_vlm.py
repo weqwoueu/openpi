@@ -756,6 +756,7 @@ def _build_inference_dataset(
 
     data_config = _config.DataConfig(
         local_data_dir=str(data_dir),
+        action_sequence_keys=(),
         prompt_from_task=False,
         data_transforms=_transforms.Group(
             inputs=[
