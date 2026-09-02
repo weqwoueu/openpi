@@ -13,8 +13,8 @@ CHUNK_SIZE=50
 MAX_STEPS=600000
 # Positive integer: run a fixed number of episodes. -1: run forever.
 NUM_EPISODES=-1
-# Ordinary pi0.5: leave empty. Future PiStar inference: positive.
-ADV_IND=""
+# PiStar inference condition.
+ADV_IND="positive"
 # =============================================================
 
 ENV_SCRIPT="${REPO_ROOT}/my_env.sh"

@@ -5,15 +5,15 @@ set -euo pipefail
 # ==================== Edit these settings ====================
 REPO_ROOT="/home/standard/workspace/pistar/openpi"
 CHECKPOINT_DIR="/home/standard/workspace/liuzijian/checkpoints/openpi/pi05_piperx_plug_sft/piperx_plug_sft/29999"
-TRAIN_CONFIG="pi05_piperx_plug_sft"
+TRAIN_CONFIG="pi05_piperx_plug_recap1"
 OPENPI_DATA_HOME_DIR="/home/standard/workspace/liuzijian/checkpoints/openpi"
 CUDA_VISIBLE_DEVICES_VALUE="0"
 XLA_PYTHON_CLIENT_PREALLOCATE_VALUE="false"
 HOST="0.0.0.0"
 PORT=8000
 DEFAULT_PROMPT="put the black plug into the two-hole socket"
-# Ordinary pi0.5: leave empty. Future PiStar inference: for example 2.0.
-ADV_GUIDANCE_BETA=""
+# PiStar positive-condition guidance scale.
+ADV_GUIDANCE_BETA="2.0"
 # =============================================================
 
 SERVER_SCRIPT="${REPO_ROOT}/control_your_robot/scripts/serve_piper_single_pi05star_websocket.py"

@@ -1,4 +1,5 @@
 import argparse
+import dataclasses
 import math
 from pathlib import Path
 import sys
@@ -52,6 +53,11 @@ def main():
 
     train_config = _config.get_config(args.train_config)
     is_pistar = bool(getattr(getattr(train_config, "model", None), "pistar", False))
+    if is_pistar:
+        train_config = dataclasses.replace(
+            train_config,
+            data=dataclasses.replace(train_config.data, adv_ind_dropout=False),
+        )
     if args.adv_guidance_beta is not None and not is_pistar:
         parser.error("--adv-guidance-beta can only be used with a PiStar config")
     if args.adv_guidance_beta is not None and not math.isfinite(args.adv_guidance_beta):
